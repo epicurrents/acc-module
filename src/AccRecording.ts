@@ -88,6 +88,23 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
     /** Shorthand for accessing ACC module settings from the global runtime. */
     #SETTINGS = (window.__EPICURRENTS__?.RUNTIME?.SETTINGS.modules.acc as AccModuleSettings) || null
 
+    /**
+     * Construct the ACC recording from the importer's parsed CSV stream. The
+     * `channels` descriptors are wrapped in `AccSourceChannel` and their
+     * baseline offsets are distributed evenly straight away — ACC defaults to
+     * raw display (no montage) where the `GenericBiosignalMontage` path that
+     * normally distributes baseline offsets never runs. The service captures
+     * `fileWorker` for the rest of the resource's lifetime; the activation
+     * handler installed here wires SAB or fallback-cache setup, default-montage
+     * activation, and the cache-fill kickoff together.
+     * @param name - Human-readable resource name; surfaced in the dataset navigator.
+     * @param channels - Per-column descriptors the CSV importer wrote into `study.meta.channels`.
+     * @param header - Parsed biosignal header carrying duration, sampling rate, and the per-channel layout.
+     * @param fileWorker - Worker that runs the CSV reader off the main thread.
+     * @param memoryManager - Optional SAB manager; when present and `useMemoryManager` is on, signals
+     *                       cache into a shared buffer instead of the main-thread fallback cache.
+     * @param config - Optional resource overrides (`modality`, `formatHeader`); empty by default.
+     */
     constructor (
         name: string,
         channels: BiosignalChannel[],
