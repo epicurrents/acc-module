@@ -8,6 +8,7 @@
 import AccCascadeMontage from '#components/AccCascadeMontage'
 import AccEvent from '#components/AccEvent'
 import AccLabel from '#components/AccLabel'
+import AccMontage from '#components/AccMontage'
 import AccMontageChannel from '#components/AccMontageChannel'
 import AccRecording from './AccRecording'
 import AccService from '#service/AccService'
@@ -26,6 +27,7 @@ export {
     AccCascadeMontage,
     AccEvent,
     AccLabel,
+    AccMontage,
     AccMontageChannel,
     AccRecording,
     AccService,

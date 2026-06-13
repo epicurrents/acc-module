@@ -1,11 +1,12 @@
 /**
  * Epicurrents accelerometry recording.
  *
- * Thin wrapper around `GenericBiosignalResource`. The accelerometry-specific
- * logic is concentrated in {@link AccRecording._applyDefaultSetups} — runs
- * during `prepare()` (after the worker has parsed the file header, before the
- * resource is activated), parses source-channel labels into sensor groups, and
- * declares one `SetupDerivation` per resolved three-axis group. Phase 1's
+ * Thin wrapper around `GenericBiosignalResource`. Source-channel construction
+ * is driven by the parsed `BiosignalChannel[]` and `BiosignalHeaderRecord` the
+ * CSV importer hands over via `study.meta`; `prepare()` then awaits the
+ * worker's parse-and-acknowledge round trip before calling
+ * {@link AccRecording._applyDefaultSetups}, which declares one
+ * `SetupDerivation` per resolved three-axis sensor group. Phase 1's
  * materialisation pipeline picks those derivations up automatically: memory
  * budget accounts for them, the worker allocates a cache slot per derivation,
  * and `_materialiseDerivation` computes `sqrt(x² + y² + z²)` sample-by-sample
@@ -22,12 +23,26 @@ import {
     GenericBiosignalSetup,
 } from '@epicurrents/core'
 import { AssetEvents, BiosignalResourceEvents } from '@epicurrents/core/dist/events'
+import { calculateSignalOffsets } from '@epicurrents/core/dist/util'
 import type {
+    BiosignalChannel,
+    BiosignalChannelTemplate,
+    BiosignalConfig,
+    BiosignalHeaderRecord,
+    BiosignalLaterality,
+    BiosignalMontage,
+    BiosignalMontageTemplate,
     BiosignalSetup,
+    ConfigBiosignalMontage,
+    ConfigMapChannels,
+    MemoryManager,
     SetupChannel,
+    StudyContext,
+    UrlAccessOptions,
 } from '@epicurrents/core/dist/types'
 import { Log } from 'scoped-event-log'
 import AccCascadeMontage from '#components/AccCascadeMontage'
+import AccMontage from '#components/AccMontage'
 import AccService from '#service/AccService'
 import AccSourceChannel from '#components/AccSourceChannel'
 import {
@@ -39,53 +54,84 @@ import type {
     AccModuleSettings,
     AccResource,
     AccSensorGroup,
-    AccStudyContext,
 } from '#types'
 
 const SCOPE = 'AccRecording'
 
+/**
+ * Map a sensor-group id to a short display prefix. `leftwrist` → `L Wrist`,
+ * `rightankle` → `R Ankle`, `wrist` → `Wrist`. Inputs without a `left` /
+ * `right` prefix come through unchanged with the first letter capitalised.
+ */
+function prettyGroupPrefix (groupId: string): string {
+    const lower = groupId.toLowerCase()
+    let side = ''
+    let rest = groupId
+    if (lower.startsWith('left')) {
+        side = 'L'
+        rest = groupId.slice(4)
+    } else if (lower.startsWith('right')) {
+        side = 'R'
+        rest = groupId.slice(5)
+    }
+    const restLabel = rest ? rest.charAt(0).toUpperCase() + rest.slice(1).toLowerCase() : ''
+    return [side, restLabel].filter(Boolean).join(' ')
+}
+
 export default class AccRecording extends GenericBiosignalResource implements AccResource {
 
+    protected _headers: BiosignalHeaderRecord
+    protected _recMontageTemplate: BiosignalMontageTemplate | null = null
     protected _samplingRate: number | null = null
     protected _sensorGroups: AccSensorGroup[] = []
     protected _service: AccService | null = null
     #SETTINGS = (window.__EPICURRENTS__?.RUNTIME?.SETTINGS.modules.acc as AccModuleSettings) || null
 
-    constructor (name: string, source?: AccStudyContext, worker?: Worker) {
-        super(name, 'acc', source)
+    constructor (
+        name: string,
+        channels: BiosignalChannel[],
+        header: BiosignalHeaderRecord,
+        fileWorker: Worker,
+        memoryManager?: MemoryManager,
+        config: BiosignalConfig = {} as BiosignalConfig,
+    ) {
+        super(name, config?.modality || 'acc')
+        if (!this.#SETTINGS) {
+            Log.error(`ACC settings not found in the global Epicurrents runtime.`, SCOPE)
+        }
+        this._headers = header
+        if (memoryManager && this.#SETTINGS?.useMemoryManager) {
+            this.setMemoryManager(memoryManager)
+        }
+        for (let i = 0; i < channels.length; i++) {
+            const ch = channels[i]
+            this._channels.push(new AccSourceChannel(
+                ch.name || `ch_${i}`,
+                ch.label || `ACC ${i + 1}`,
+                i,
+                ch.samplingRate || 0,
+                ch.visible ?? true,
+                ch.unit || 'g',
+                ch,
+            ))
+        }
+        // ACC source channels render raw (no montage), so the
+        // `GenericBiosignalMontage` path that normally distributes baseline
+        // offsets never runs. Place each source channel at an equal vertical
+        // slot now.
+        calculateSignalOffsets(this._channels)
+        // Service owns the worker for the rest of the resource's lifetime.
+        this._service = new AccService(this, fileWorker, this._memoryManager || undefined)
+        this._samplingRate = header.maxSamplingRate || channels[0]?.samplingRate || 0
+        this._dataDuration = header.dataDuration || header.duration || 0
+        this._totalDuration = header.duration || this._dataDuration
+        this._startTime = header.recordingStartTime ?? null
+        this._state = 'loading'
         this.addEventListener(AssetEvents.DEACTIVATE, async () => {
             if (this.#SETTINGS?.unloadOnClose && this._service?.isReady) {
                 await this.unload()
             }
         }, this.id)
-        if (!source) {
-            return
-        }
-        for (let i = 0; i < source.meta.nChannels; i++) {
-            this._channels.push(new AccSourceChannel(
-                `ch_${i}`,
-                `ACC ${i + 1}`,
-                i,
-                source.meta.samplingRate || 0,
-                true,
-            ))
-        }
-        this._dataDuration = source.meta.duration || 0
-        this._totalDuration = this._dataDuration
-        this._samplingRate = source.meta.samplingRate || 0
-        if (!worker) {
-            return
-        }
-        this._service = new AccService(this, worker)
-        this._service.prepareWorker(source).then((response) => {
-            if (response) {
-                this._state = 'ready'
-            } else {
-                this._errorReason = 'Preparing worker failed'
-                this._state = 'error'
-            }
-        })
-        this._state = 'loading'
         this.addEventListener(AssetEvents.ACTIVATE, async () => {
             if (!this._isActive) {
                 return
@@ -93,13 +139,10 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
             if (!this._service?.isReady && this._state === 'ready') {
                 this.dispatchEvent(BiosignalResourceEvents.SIGNAL_CACHING_COMPLETE, 'before')
                 if (this._memoryManager) {
-                    // Memory budget: source channels + derivation slots declared
-                    // during `_applyDefaultSetups`. The helper on the base class
-                    // walks the setup's derivations and contributes one slot each.
                     let totalMem = 4
                     const dataFieldsLen = BiosignalMutex.SIGNAL_DATA_POS
                     for (const chan of this.channels) {
-                        totalMem += chan.samplingRate*this._totalDuration + dataFieldsLen
+                        totalMem += chan.samplingRate * this._totalDuration + dataFieldsLen
                     }
                     for (const slot of this._derivationCacheSlots()) {
                         totalMem += slot.sampleCount + dataFieldsLen
@@ -133,6 +176,10 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
                     }
                     Log.debug(`Data cache setup complete.`, SCOPE)
                 }
+                // Default montage ('rec') needs the mutex/cache in place;
+                // adding it before `cacheSignals` ensures it's the active
+                // montage by the time signals start arriving.
+                await this._applyDefaultMontages()
                 Log.debug(`ACC recording initial setup complete.`, SCOPE)
                 const cacheOk = await this.cacheSignals()
                 if (cacheOk === false) {
@@ -159,6 +206,46 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
     }
 
     /**
+     * Run after construction but before activation. Posts the parsed header
+     * and source URL to the worker, awaits its acknowledgement (which carries
+     * the canonical recording length), then applies the default ACC setup so
+     * sensor-group magnitude derivations are declared in time for the
+     * activation-time memory budgeter to size SAB slots for them.
+     */
+    async prepare (options?: UrlAccessOptions): Promise<boolean> {
+        if (!this._service || this._state === 'error') {
+            Log.error(
+                `Cannot prepare ACC recording; service is unavailable or already in an error state.`,
+                SCOPE,
+            )
+            return false
+        }
+        const ok = await this._service.setupWorker(
+            this._headers,
+            this._source as StudyContext,
+            options,
+        ).then(response => {
+            if (response) {
+                this.totalDuration = response
+                this.state = 'ready'
+                return true
+            }
+            this._errorReason = 'Setting up worker failed'
+            this.state = 'error'
+            return false
+        }).catch(e => {
+            Log.error(`Error when preparing the worker for the ACC recording.`, SCOPE, e as Error)
+            this._errorReason = 'Setting up worker failed'
+            this.state = 'error'
+            return false
+        })
+        if (ok) {
+            await this._applyDefaultSetups()
+        }
+        return ok
+    }
+
+    /**
      * Build the canonical accelerometry setup from the source channels.
      * Sensor groups are parsed via the channel-name pattern from settings,
      * resolved 3-axis groups produce one `SetupDerivation` each, and the
@@ -182,19 +269,213 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
             scale: 0,
             unit: ch.unit,
         }))
-        setup.channels = setupChannels
         const groups = parseSensorGroups(this._channels, {
             pattern: settings?.channelNamePattern,
             sideMap: settings?.sideMap,
         })
         this._sensorGroups = groups
-        setup.derivations = magnitudeDerivationsForGroups(groups)
+        const derivations = magnitudeDerivationsForGroups(groups)
+        // Index each derivation by its source-channel name so we can wire the
+        // friendly label back onto the matching sensor group below.
+        const derivByGroup = new Map<string, typeof derivations[number]>()
+        for (const d of derivations) {
+            // Derivation names look like `<groupId>_mag` — recover the group.
+            const groupId = d.name.endsWith('_mag') ? d.name.slice(0, -4) : d.name
+            derivByGroup.set(groupId, d)
+        }
+        setup.derivations = derivations
+        // Expose each materialised derivation as a setup channel so the montage
+        // template can reference it by name (`mapMontageChannels` searches
+        // `setup.channels` only — derivations declared on `setup.derivations`
+        // are otherwise invisible to montages). The index points at the cache
+        // slot the materialisation pipeline writes the magnitude into; slots
+        // are allocated source-first, derivations after.
+        const sourceCount = this._channels.length
+        for (let i = 0; i < derivations.length; i++) {
+            const deriv = derivations[i]
+            setupChannels.push({
+                active: sourceCount + i,
+                averaged: false,
+                displayPolarity: 0,
+                index: sourceCount + i,
+                label: deriv.label,
+                laterality: deriv.laterality,
+                modality: deriv.modality,
+                name: deriv.name,
+                reference: [],
+                samplingRate: deriv.samplingRate ?? 0,
+                scale: 0,
+                unit: deriv.unit,
+            })
+        }
+        setup.channels = setupChannels
         this.setup = setup
+        // Build the default `rec` montage template — one row per source axis and
+        // one per magnitude derivation, with friendly labels (`L Wrist X`,
+        // `R Wrist |a|`, etc.). The montage activation in `_applyDefaultMontages`
+        // uses this template; storing it on the resource keeps the label
+        // generation in one place.
+        this._recMontageTemplate = this._buildRecMontageTemplate(groups, derivByGroup)
+        // Also expose the magnitude derivations as source channels so the raw
+        // (no-montage) view shows them too. Mirrors the cache slot layout.
+        for (let i = 0; i < derivations.length; i++) {
+            const deriv = derivations[i]
+            this._channels.push(new AccSourceChannel(
+                deriv.name,
+                deriv.label,
+                sourceCount + i,
+                deriv.samplingRate ?? 0,
+                true,
+                deriv.unit,
+                { laterality: deriv.laterality },
+            ))
+        }
+        calculateSignalOffsets(this._channels)
         Log.debug(
             `ACC setup applied: ${groups.length} sensor group(s), ` +
-            `${setup.derivations.length} magnitude derivation(s).`,
+            `${derivations.length} magnitude derivation(s).`,
             SCOPE,
         )
+    }
+
+    /**
+     * Compose the `rec` montage template for the resolved sensor groups. Each
+     * 3-axis group contributes three axis rows plus one magnitude row; groups
+     * without a magnitude derivation (incomplete 3-axis coverage) get only
+     * their axes. Friendly labels use {@link prettyGroupPrefix} to produce
+     * short, plot-friendly text.
+     */
+    protected _buildRecMontageTemplate (
+        groups: AccSensorGroup[],
+        derivByGroup: Map<string, { name: string, label: string, samplingRate?: number, laterality: BiosignalLaterality, unit: string }>,
+    ): BiosignalMontageTemplate {
+        const channels: BiosignalChannelTemplate[] = []
+        const electrodes: string[] = []
+        // `layout` is the number of channel rows per visual group — drives the
+        // baseline-offset computation in `calculateSignalOffsets`. Without it
+        // the offset routine sees an empty layout, leaves every channel at the
+        // default baseline, and the rows stack on top of each other. Each
+        // sensor group contributes its axes + (optional) magnitude as one
+        // visual group with a small inter-group gap.
+        const layout: number[] = []
+        for (const group of groups) {
+            const prefix = prettyGroupPrefix(group.id)
+            const axes: ('x' | 'y' | 'z')[] = ['x', 'y', 'z']
+            let perGroup = 0
+            for (const axis of axes) {
+                const idx = group.axes[axis]
+                if (idx === null) {
+                    continue
+                }
+                const sourceChan = this._channels[idx]
+                if (!sourceChan) {
+                    continue
+                }
+                electrodes.push(sourceChan.name)
+                channels.push({
+                    name: sourceChan.name,
+                    label: [prefix, axis.toUpperCase()].filter(Boolean).join(' '),
+                    active: sourceChan.name,
+                    reference: [],
+                    modality: 'acc',
+                    laterality: group.laterality,
+                    unit: sourceChan.unit,
+                } as BiosignalChannelTemplate)
+                perGroup++
+            }
+            const deriv = derivByGroup.get(group.id)
+            if (deriv) {
+                electrodes.push(deriv.name)
+                channels.push({
+                    name: deriv.name,
+                    label: [prefix, '|a|'].filter(Boolean).join(' '),
+                    active: deriv.name,
+                    reference: [],
+                    modality: 'acc',
+                    laterality: group.laterality,
+                    unit: deriv.unit,
+                } as BiosignalChannelTemplate)
+                perGroup++
+            }
+            if (perGroup > 0) {
+                layout.push(perGroup)
+            }
+        }
+        return {
+            name: 'rec',
+            label: 'As recorded',
+            channels,
+            electrodes,
+            layout,
+        } as BiosignalMontageTemplate
+    }
+
+    /**
+     * Add a flat `AccMontage` to this recording. Mirrors `EegRecording.addMontage`
+     * — the worker mutex/cache must already be live before this is called, so
+     * the caller (typically {@link _applyDefaultMontages}) runs from the
+     * activation handler after `setupMutex` / `setupCache` completes.
+     */
+    async addMontage (
+        name: string,
+        label: string,
+        setup: BiosignalSetup | string,
+        template?: BiosignalMontageTemplate,
+        config?: ConfigMapChannels,
+    ): Promise<BiosignalMontage | null> {
+        let montage = this._montages.find(m => m.name === name) || null
+        if (this._mutexProps && this._service?.bufferRangeStart === undefined) {
+            Log.error(`Cannot add a montage before buffer has been initialized.`, SCOPE)
+            return null
+        }
+        if (montage) {
+            Log.debug(`Montage '${name}' already exists.`, SCOPE)
+            return montage
+        }
+        let resolvedSetup: BiosignalSetup
+        if (typeof setup === 'string') {
+            if (this._setup?.name === setup) {
+                resolvedSetup = this._setup
+            } else {
+                Log.error(`Setup '${setup}' not found.`, SCOPE)
+                return null
+            }
+        } else {
+            resolvedSetup = setup
+        }
+        const created = new AccMontage(
+            name,
+            this,
+            resolvedSetup,
+            template,
+            this._memoryManager || undefined,
+            { label } as ConfigBiosignalMontage,
+        )
+        created.mapChannels(config)
+        if (this._mutexProps) {
+            await created.setupServiceWithInputMutex(this._mutexProps)
+        } else if (this._cacheProps) {
+            await created.setupServiceWithCache(this._cacheProps)
+        }
+        created.setInterruptions(this._interruptions)
+        this._setPropertyValue('montages', [...this._montages, created])
+        return created
+    }
+
+    /**
+     * Build and activate the default `rec` montage. Runs from the ACTIVATE
+     * handler after the SAB is in place — `addMontage` needs the worker mutex
+     * to commission the montage processor.
+     */
+    protected async _applyDefaultMontages (): Promise<void> {
+        if (!this._recMontageTemplate || !this._setup) {
+            return
+        }
+        const created = await this.addMontage('rec', 'As recorded', this._setup, this._recMontageTemplate)
+        if (created) {
+            await this.setActiveMontage('rec')
+            Log.debug(`Activated default 'rec' montage.`, SCOPE)
+        }
     }
 
     /**

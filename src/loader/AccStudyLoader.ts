@@ -1,26 +1,32 @@
 /**
  * Epicurrents ACC study loader.
+ *
+ * Pulls the parsed channel descriptors and {@link BiosignalHeaderRecord} the
+ * CSV importer wrote into `study.meta` and hands them to `AccRecording` along
+ * with the file worker and the registered memory manager. The resource's own
+ * `prepare()` then runs the worker round-trip and applies the default ACC
+ * setup before activation.
+ *
  * @package    epicurrents/acc-module
  * @copyright  2026 Sampsa Lohi
  * @license    Apache-2.0
  */
 
-import { GenericStudyLoader } from '@epicurrents/core'
+import { BiosignalStudyLoader, GenericBiosignalHeader } from '@epicurrents/core'
 import type {
+    BiosignalChannel,
     ConfigStudyLoader,
     FileFormatImporter,
     FileSystemItem,
     StudyContext,
 } from '@epicurrents/core/dist/types'
-import { AccRecording } from '..'
-import type { AccResource, AccStudyContext } from '#types'
+import AccRecording from '../AccRecording'
+import type { AccResource } from '#types'
 import { Log } from 'scoped-event-log'
 
 const SCOPE = 'AccStudyLoader'
 
-export default class AccStudyLoader extends GenericStudyLoader {
-
-    protected _study: AccStudyContext | null = null
+export default class AccStudyLoader extends BiosignalStudyLoader {
 
     constructor (name: string, importer: FileFormatImporter) {
         super(name, ['acc'], importer)
@@ -37,9 +43,14 @@ export default class AccStudyLoader extends GenericStudyLoader {
         } else if (!this._study) {
             return null
         }
-        if (!this._study.name) {
+        const meta = this._study.meta as {
+            channels?: BiosignalChannel[]
+            header?: GenericBiosignalHeader
+        }
+        if (!this._study.name || !meta?.channels || !meta.header) {
             Log.error(
-                `Cannot construct an ACC resource from given study context; it is missing required properties.`,
+                `Cannot construct an ACC resource from given study context; ` +
+                `it is missing required properties (channels / header).`,
                 SCOPE,
             )
             return null
@@ -51,11 +62,13 @@ export default class AccStudyLoader extends GenericStudyLoader {
         }
         const acc = new AccRecording(
             this._study.name,
-            this._study,
+            meta.channels,
+            meta.header,
             worker,
+            this._memoryManager || undefined,
         )
-        acc.state = 'loaded'
         acc.source = this._study
+        acc.state = 'loaded'
         this._resources.push(acc)
         this._study = null
         return acc

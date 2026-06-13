@@ -20,7 +20,21 @@ const accSettings: AccModuleSettings = {
         convertPatterns: [] as [string, BiosignalAnnotationEvent][],
         ignorePatterns: [] as string[],
     },
+    // Modality → list of filter types whose recording-level default propagates
+    // to channels of that modality. Without an entry for `'acc'`, the helper
+    // `getChannelFilters` falls back to each channel's own (zero) filter value
+    // and the recording-level `filters.highpass`/`lowpass`/`notch` set via the
+    // controls silently never reach the worker.
+    filterChannelTypes: {
+        acc: ['highpass', 'lowpass'],
+    },
     filterPaddingSeconds: 0.1,
+    // Empty by default — accelerometry has no canonical band taxonomy like the
+    // EEG δ/θ/α/β set. The FftTool iterates this array to draw guideline bars
+    // and compute per-band powers; an empty array suppresses both, leaving the
+    // raw spectrum visible. A deployment that wants posture / tremor bands can
+    // override per-host (e.g. { name: 'tremor', upperLimit: 12 }).
+    frequencyBands: [] as { name: string, symbol?: string, upperLimit: number }[],
     showHiddenChannels: false,
     showMissingChannels: false,
     /**

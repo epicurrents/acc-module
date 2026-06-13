@@ -41,7 +41,19 @@ const ACC = safeObjectFrom({
         if (!activeRes) {
             return
         }
-        if (property === 'highpass-filter') {
+        if (property === 'active-montage') {
+            if (
+                typeof value !== 'string' &&
+                typeof value !== 'number' &&
+                value !== null
+            ) {
+                logInvalidMutation(property, value, SCOPE)
+                return
+            }
+            if (activeRes.activeMontage !== undefined) {
+                activeRes.setActiveMontage(value)
+            }
+        } else if (property === 'highpass-filter') {
             if (typeof value !== 'number' || value < 0) {
                 logInvalidMutation(property, value, SCOPE, 'Value must be a positive number.')
                 return

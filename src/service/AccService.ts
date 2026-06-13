@@ -1,22 +1,38 @@
 /**
- * Epicurrents ACC service.
+ * Epicurrents ACC service. Bridges the main-thread {@link AccRecording} with
+ * the CSV reader worker. Mirrors the EEG service pattern: `setupWorker` posts
+ * the parsed `BiosignalHeaderRecord` plus the source URL to the worker, awaits
+ * the recording-length response, and returns it so the resource can set its
+ * `totalDuration` and proceed with `_applyDefaultSetups()`.
+ *
  * @package    epicurrents/acc-module
  * @copyright  2026 Sampsa Lohi
  * @license    Apache-2.0
  */
 
 import { GenericBiosignalService } from '@epicurrents/core'
-import type { StudyContext, WorkerResponse } from '@epicurrents/core/dist/types'
-import type { AccDataService, AccResource, SetupAccWorkerResponse } from '#types'
+import type {
+    BiosignalDataService,
+    BiosignalHeaderRecord,
+    BiosignalResource,
+    MemoryManager,
+    SetupStudyResponse,
+    StudyContext,
+    UrlAccessOptions,
+    WorkerResponse,
+} from '@epicurrents/core/dist/types'
+import { Log } from 'scoped-event-log'
 
-export default class AccService extends GenericBiosignalService implements AccDataService {
+const SCOPE = 'AccService'
+
+export default class AccService extends GenericBiosignalService implements BiosignalDataService {
 
     get worker () {
         return this._worker
     }
 
-    constructor (recording: AccResource, worker: Worker) {
-        super(recording, worker)
+    constructor (recording: BiosignalResource, worker: Worker, manager?: MemoryManager) {
+        super(recording, worker, manager)
         this._worker?.addEventListener('message', this.handleMessage.bind(this))
     }
 
@@ -28,15 +44,26 @@ export default class AccService extends GenericBiosignalService implements AccDa
         return super.handleMessage(message)
     }
 
-    async prepareWorker (study: StudyContext) {
-        const { file, url } = study.files.filter(f => f.role === 'data')[0]
+    async setupWorker (
+        header: BiosignalHeaderRecord,
+        study: StudyContext,
+        options?: UrlAccessOptions,
+    ) {
+        const fileUrl = study.files.filter(f => f.role === 'data').map(file => file.url)[0]
+        if (!fileUrl) {
+            Log.error(`Cannot set up worker: study has no data file URL.`, SCOPE)
+            return null as unknown as SetupStudyResponse
+        }
+        Log.info(`Loading ACC study ${study.name} in worker.`, SCOPE)
+        this._initWaiters('setup-worker')
         const commission = this._commissionWorker(
             'setup-worker',
             new Map<string, unknown>([
-                ['file', file],
-                ['url', url],
+                ['header', header.serializable],
+                ['url', fileUrl],
+                ['authHeader', options?.authHeader || null],
             ]),
         )
-        return commission.promise as Promise<SetupAccWorkerResponse>
+        return commission.promise as Promise<SetupStudyResponse>
     }
 }

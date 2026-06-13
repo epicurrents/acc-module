@@ -64,6 +64,9 @@ export interface AccResource extends BiosignalResource {
 
 /**
  * ACC study context with the meta properties every accelerometry recording carries.
+ * `channels` and `header` are populated by the CSV importer's full-file parse;
+ * the convenience fields (`duration`, `nChannels`, `samplingRate`) mirror the
+ * same values for callers that want them without going through `header`.
  */
 export type AccStudyContext = StudyContext & {
     meta: StudyContext['meta'] & {
@@ -71,11 +74,6 @@ export type AccStudyContext = StudyContext & {
         nChannels: number
         samplingRate: number
     }
-}
-
-export type SetupAccWorkerResponse = {
-    length: number
-    samplingRate: number
 }
 
 /**
