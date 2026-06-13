@@ -27,13 +27,13 @@ const SCOPE = 'AccService'
 
 export default class AccService extends GenericBiosignalService implements BiosignalDataService {
 
-    get worker () {
-        return this._worker
-    }
-
     constructor (recording: BiosignalResource, worker: Worker, manager?: MemoryManager) {
         super(recording, worker, manager)
         this._worker?.addEventListener('message', this.handleMessage.bind(this))
+    }
+
+    get worker () {
+        return this._worker
     }
 
     async handleMessage (message: WorkerResponse) {

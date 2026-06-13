@@ -74,7 +74,7 @@ export default class AccStudyLoader extends BiosignalStudyLoader {
         return acc
     }
 
-    public async loadFromDirectory (dir: FileSystemItem, config?: ConfigStudyLoader): Promise<StudyContext | null> {
+    async loadFromDirectory (dir: FileSystemItem, config?: ConfigStudyLoader): Promise<StudyContext | null> {
         const context = await super.loadFromDirectory(dir, config)
         if (!context) {
             return null
@@ -83,7 +83,7 @@ export default class AccStudyLoader extends BiosignalStudyLoader {
         return context
     }
 
-    public async loadFromUrl (
+    async loadFromUrl (
         fileUrl: string,
         config?: ConfigStudyLoader,
         preStudy?: StudyContext | undefined,

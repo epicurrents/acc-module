@@ -60,6 +60,19 @@ export interface AccResource extends BiosignalResource {
      * `_applyDefaultSetups()`. Empty when no group resolves all three axes.
      */
     sensorGroups: AccSensorGroup[]
+    /**
+     * Register a cascade montage per entry. The first candidate name that
+     * resolves against the recording's setup (matched on derivations first,
+     * then on source channels by either `name` or `label`) wins; per-entry
+     * display defaults (`sensitivity`, `highpass`, `lowpass`, `notch`) are
+     * applied to the created cascade so the initial view is usable without
+     * further fiddling. ACC only ever has one setup, so the lookup runs
+     * directly against `this.setup`.
+     * @param entries - Declarative cascade definitions; see {@link AccCascadeEntry}.
+     * @returns The list of cascade montage names that were actually added —
+     *          entries whose candidates did not resolve are silently skipped.
+     */
+    addCascadeMontagesFromEntries (entries: AccCascadeEntry[]): Promise<string[]>
 }
 
 /**

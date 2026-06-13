@@ -85,6 +85,7 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
     protected _samplingRate: number | null = null
     protected _sensorGroups: AccSensorGroup[] = []
     protected _service: AccService | null = null
+    /** Shorthand for accessing ACC module settings from the global runtime. */
     #SETTINGS = (window.__EPICURRENTS__?.RUNTIME?.SETTINGS.modules.acc as AccModuleSettings) || null
 
     constructor (
@@ -206,43 +207,19 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
     }
 
     /**
-     * Run after construction but before activation. Posts the parsed header
-     * and source URL to the worker, awaits its acknowledgement (which carries
-     * the canonical recording length), then applies the default ACC setup so
-     * sensor-group magnitude derivations are declared in time for the
-     * activation-time memory budgeter to size SAB slots for them.
+     * Build and activate the default `rec` montage. Runs from the ACTIVATE
+     * handler after the SAB is in place — `addMontage` needs the worker mutex
+     * to commission the montage processor.
      */
-    async prepare (options?: UrlAccessOptions): Promise<boolean> {
-        if (!this._service || this._state === 'error') {
-            Log.error(
-                `Cannot prepare ACC recording; service is unavailable or already in an error state.`,
-                SCOPE,
-            )
-            return false
+    protected async _applyDefaultMontages (): Promise<void> {
+        if (!this._recMontageTemplate || !this._setup) {
+            return
         }
-        const ok = await this._service.setupWorker(
-            this._headers,
-            this._source as StudyContext,
-            options,
-        ).then(response => {
-            if (response) {
-                this.totalDuration = response
-                this.state = 'ready'
-                return true
-            }
-            this._errorReason = 'Setting up worker failed'
-            this.state = 'error'
-            return false
-        }).catch(e => {
-            Log.error(`Error when preparing the worker for the ACC recording.`, SCOPE, e as Error)
-            this._errorReason = 'Setting up worker failed'
-            this.state = 'error'
-            return false
-        })
-        if (ok) {
-            await this._applyDefaultSetups()
+        const created = await this.addMontage('rec', 'As recorded', this._setup, this._recMontageTemplate)
+        if (created) {
+            await this.setActiveMontage('rec')
+            Log.debug(`Activated default 'rec' montage.`, SCOPE)
         }
-        return ok
     }
 
     /**
@@ -411,79 +388,10 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
     }
 
     /**
-     * Add a flat `AccMontage` to this recording. Mirrors `EegRecording.addMontage`
-     * — the worker mutex/cache must already be live before this is called, so
-     * the caller (typically {@link _applyDefaultMontages}) runs from the
-     * activation handler after `setupMutex` / `setupCache` completes.
-     */
-    async addMontage (
-        name: string,
-        label: string,
-        setup: BiosignalSetup | string,
-        template?: BiosignalMontageTemplate,
-        config?: ConfigMapChannels,
-    ): Promise<BiosignalMontage | null> {
-        let montage = this._montages.find(m => m.name === name) || null
-        if (this._mutexProps && this._service?.bufferRangeStart === undefined) {
-            Log.error(`Cannot add a montage before buffer has been initialized.`, SCOPE)
-            return null
-        }
-        if (montage) {
-            Log.debug(`Montage '${name}' already exists.`, SCOPE)
-            return montage
-        }
-        let resolvedSetup: BiosignalSetup
-        if (typeof setup === 'string') {
-            if (this._setup?.name === setup) {
-                resolvedSetup = this._setup
-            } else {
-                Log.error(`Setup '${setup}' not found.`, SCOPE)
-                return null
-            }
-        } else {
-            resolvedSetup = setup
-        }
-        const created = new AccMontage(
-            name,
-            this,
-            resolvedSetup,
-            template,
-            this._memoryManager || undefined,
-            { label } as ConfigBiosignalMontage,
-        )
-        created.mapChannels(config)
-        if (this._mutexProps) {
-            await created.setupServiceWithInputMutex(this._mutexProps)
-        } else if (this._cacheProps) {
-            await created.setupServiceWithCache(this._cacheProps)
-        }
-        created.setInterruptions(this._interruptions)
-        this._setPropertyValue('montages', [...this._montages, created])
-        return created
-    }
-
-    /**
-     * Build and activate the default `rec` montage. Runs from the ACTIVATE
-     * handler after the SAB is in place — `addMontage` needs the worker mutex
-     * to commission the montage processor.
-     */
-    protected async _applyDefaultMontages (): Promise<void> {
-        if (!this._recMontageTemplate || !this._setup) {
-            return
-        }
-        const created = await this.addMontage('rec', 'As recorded', this._setup, this._recMontageTemplate)
-        if (created) {
-            await this.setActiveMontage('rec')
-            Log.debug(`Activated default 'rec' montage.`, SCOPE)
-        }
-    }
-
-    /**
-     * Override of `GenericBiosignalResource._constructCascadeMontage` so the
-     * ACC resource's `addCascadeMontage` produces `AccCascadeMontage` instances
-     * — rows wrapped in `AccMontageChannel`. No worker override: cascade reads
-     * raw signals directly via `getAllRawSignals` and bypasses the montage
-     * worker entirely (see the base class).
+     * Wraps the base resource's cascade-construction hook so the returned
+     * montage is an `AccCascadeMontage` with `AccMontageChannel` rows. The
+     * cascade reads raw signals directly via `getAllRawSignals` and bypasses
+     * the montage worker entirely (see the base class for the rationale).
      */
     protected override _constructCascadeMontage (
         name: string,
@@ -499,17 +407,6 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
         )
     }
 
-    /**
-     * Declarative cascade registration. Each entry names a list of candidate
-     * source labels — the first that resolves against the recording's setup
-     * (matched on either `name` or `label`) wins. ACC only ever has one setup,
-     * so the lookup happens against `this.setup` directly. Per-entry display
-     * defaults (sensitivity, filters) are applied to the created cascade so
-     * the user gets sane initial values without having to fiddle with each one.
-     *
-     * Returns the list of cascade montage names that were actually added so
-     * callers can confirm which entries resolved.
-     */
     async addCascadeMontagesFromEntries (entries: AccCascadeEntry[]): Promise<string[]> {
         if (!entries?.length || !this._setup) {
             return []
@@ -569,6 +466,52 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
         return added
     }
 
+    async addMontage (
+        name: string,
+        label: string,
+        setup: BiosignalSetup | string,
+        template?: BiosignalMontageTemplate,
+        config?: ConfigMapChannels,
+    ): Promise<BiosignalMontage | null> {
+        let montage = this._montages.find(m => m.name === name) || null
+        if (this._mutexProps && this._service?.bufferRangeStart === undefined) {
+            Log.error(`Cannot add a montage before buffer has been initialized.`, SCOPE)
+            return null
+        }
+        if (montage) {
+            Log.debug(`Montage '${name}' already exists.`, SCOPE)
+            return montage
+        }
+        let resolvedSetup: BiosignalSetup
+        if (typeof setup === 'string') {
+            if (this._setup?.name === setup) {
+                resolvedSetup = this._setup
+            } else {
+                Log.error(`Setup '${setup}' not found.`, SCOPE)
+                return null
+            }
+        } else {
+            resolvedSetup = setup
+        }
+        const created = new AccMontage(
+            name,
+            this,
+            resolvedSetup,
+            template,
+            this._memoryManager || undefined,
+            { label } as ConfigBiosignalMontage,
+        )
+        created.mapChannels(config)
+        if (this._mutexProps) {
+            await created.setupServiceWithInputMutex(this._mutexProps)
+        } else if (this._cacheProps) {
+            await created.setupServiceWithCache(this._cacheProps)
+        }
+        created.setInterruptions(this._interruptions)
+        this._setPropertyValue('montages', [...this._montages, created])
+        return created
+    }
+
     getMainProperties () {
         const props = super.getMainProperties()
         if (props.size) {
@@ -578,5 +521,38 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
             props.set('signals', this._channels.length)
         }
         return props
+    }
+
+    async prepare (options?: UrlAccessOptions): Promise<boolean> {
+        if (!this._service || this._state === 'error') {
+            Log.error(
+                `Cannot prepare ACC recording; service is unavailable or already in an error state.`,
+                SCOPE,
+            )
+            return false
+        }
+        const ok = await this._service.setupWorker(
+            this._headers,
+            this._source as StudyContext,
+            options,
+        ).then(response => {
+            if (response) {
+                this.totalDuration = response
+                this.state = 'ready'
+                return true
+            }
+            this._errorReason = 'Setting up worker failed'
+            this.state = 'error'
+            return false
+        }).catch(e => {
+            Log.error(`Error when preparing the worker for the ACC recording.`, SCOPE, e as Error)
+            this._errorReason = 'Setting up worker failed'
+            this.state = 'error'
+            return false
+        })
+        if (ok) {
+            await this._applyDefaultSetups()
+        }
+        return ok
     }
 }

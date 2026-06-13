@@ -39,6 +39,12 @@ export default class AccCascadeMontage extends GenericBiosignalCascadeMontage {
         super(name, recording, setup, sourceLabel, rowCount, pageLength, manager, config)
     }
 
+    /**
+     * Wraps each cascade row in {@link AccMontageChannel} so per-row property
+     * changes route through the ACC-typed channel class rather than the
+     * generic base. Row naming follows the base-class convention
+     * `<source-name>_row<n>`.
+     */
     protected _createChannel (src: SetupChannel, rowIndex: number): MontageChannel {
         return new AccMontageChannel(
             this,
