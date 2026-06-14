@@ -63,6 +63,13 @@ import type {
 const SCOPE = 'AccRecording'
 
 /**
+ * Length (seconds) of each stethoscope synthesis window. Stethoscope audio is time-preserving, so its buffer length
+ * equals the synthesised range; rendering it in bounded windows that continue automatically keeps memory bounded
+ * regardless of recording length.
+ */
+const STETHOSCOPE_WINDOW_SECONDS = 60
+
+/**
  * Map a sensor-group id to a short display prefix. `leftwrist` → `L Wrist`,
  * `rightankle` → `R Ankle`, `wrist` → `Wrist`. Inputs without a `left` /
  * `right` prefix come through unchanged with the first letter capitalised.
@@ -88,6 +95,10 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
 
     /** Player for the synthesised entrainment audio. */
     protected _audio: BiosignalAudio
+    /** Whether stethoscope playback should auto-continue into the next window when the current one ends. */
+    protected _audioContinue = false
+    /** Recording time (seconds) at which the currently loaded audio buffer begins. */
+    protected _audioWindowStart = 0
     protected _headers: BiosignalHeaderRecord
     protected _isAudioPlaying = false
     protected _recMontageTemplate: BiosignalMontageTemplate | null = null
@@ -150,11 +161,7 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
         // Service owns the worker for the rest of the resource's lifetime.
         this._service = new AccService(this, fileWorker, this._memoryManager || undefined)
         this._audio = new BiosignalAudio(name)
-        this._audio.addPlayEndedCallback(() => {
-            this.isAudioPlaying = false
-            this.dispatchEvent(AccRecording.EVENTS.AUDIO_PLAYBACK_ENDED)
-            this.dispatchEvent(AccRecording.EVENTS.AUDIO_PLAYBACK_STOPPED)
-        })
+        this._audio.addPlayEndedCallback(() => this._onAudioEnded())
         this._samplingRate = header.maxSamplingRate || channels[0]?.samplingRate || 0
         this._dataDuration = header.dataDuration || header.duration || 0
         this._totalDuration = header.duration || this._dataDuration
@@ -242,7 +249,7 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
     }
 
     get playbackPosition (): number {
-        return this._audio.currentTime
+        return this._audioWindowStart + this._audio.currentTime
     }
 
     get sensorGroups (): AccSensorGroup[] {
@@ -458,6 +465,64 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
         return this._channels.findIndex(channel => channel.name.endsWith('_mag'))
     }
 
+    /**
+     * Handle the player reaching the end of a buffer. In stethoscope mode the next bounded window is synthesised and
+     * played automatically until the recording end is reached; otherwise (or at the end) the stopped/ended events fire.
+     */
+    protected async _onAudioEnded (): Promise<void> {
+        if (this._audioContinue) {
+            const windowLength = Math.min(STETHOSCOPE_WINDOW_SECONDS, this._dataDuration - this._audioWindowStart)
+            const nextStart = this._audioWindowStart + windowLength
+            if (nextStart < this._dataDuration && await this._playStethoscopeWindow(nextStart)) {
+                return
+            }
+        }
+        this._audioContinue = false
+        this.isAudioPlaying = false
+        this.dispatchEvent(AccRecording.EVENTS.AUDIO_PLAYBACK_ENDED)
+        this.dispatchEvent(AccRecording.EVENTS.AUDIO_PLAYBACK_STOPPED)
+    }
+
+    /**
+     * Synthesise and play one stethoscope window beginning at the given recording time. Sets {@link _audioWindowStart}
+     * so {@link playbackPosition} stays recording-relative.
+     * @param start - Recording time (seconds) the window begins at.
+     * @returns Whether the window was synthesised and started.
+     */
+    protected async _playStethoscopeWindow (start: number): Promise<boolean> {
+        const end = Math.min(start + STETHOSCOPE_WINDOW_SECONDS, this._dataDuration)
+        const prepared = await this.prepareAudio([start, end], 'stethoscope')
+        if (!prepared) {
+            return false
+        }
+        this._audioWindowStart = start
+        try {
+            await this._audio.play(0)
+            return true
+        } catch (err) {
+            Log.error(`Playing audio failed: ${(err as Error).message}`, SCOPE)
+        }
+        return false
+    }
+
+    /** Start playback of the loaded buffer from its beginning, dispatching the playback-started events. */
+    protected async _startPlayback (): Promise<boolean> {
+        try {
+            this.dispatchPayloadEvent(
+                AccRecording.EVENTS.AUDIO_PLAYBACK_STARTED,
+                { position: this.playbackPosition },
+                'before',
+            )
+            await this._audio.play(0)
+            this.isAudioPlaying = true
+            this.dispatchPayloadEvent(AccRecording.EVENTS.AUDIO_PLAYBACK_STARTED, { position: this.playbackPosition })
+            return true
+        } catch (err) {
+            Log.error(`Playing audio failed: ${(err as Error).message}`, SCOPE)
+        }
+        return false
+    }
+
     async addCascadeMontagesFromEntries (entries: AccCascadeEntry[]): Promise<string[]> {
         if (!entries?.length || !this._setup) {
             return []
@@ -583,14 +648,14 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
         try {
             this.dispatchPayloadEvent(
                 AccRecording.EVENTS.AUDIO_PLAYBACK_PAUSED,
-                { position: this._audio.currentTime },
+                { position: this.playbackPosition },
                 'before',
             )
             this._audio.pause()
             this.isAudioPlaying = false
             this.dispatchPayloadEvent(
                 AccRecording.EVENTS.AUDIO_PLAYBACK_PAUSED,
-                { position: this._audio.currentTime },
+                { position: this.playbackPosition },
             )
             return true
         } catch (err) {
@@ -604,23 +669,26 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
         range?: [number, number],
         method?: AudioSynthesisMethod,
     ): Promise<boolean> {
-        // (Re)synthesise when a selection or explicit method is supplied, or when nothing is loaded yet.
-        if (range !== undefined || method !== undefined || !this._audio.buffer) {
-            const prepared = await this.prepareAudio(range, method)
+        // Tear down any current playback so the player re-arms from the freshly synthesised buffer.
+        this._audio.stop()
+        if (range !== undefined) {
+            // Selected segment → spectral-tone: a one-shot steady tone, no windowed continuation, no cursor follow.
+            this._audioContinue = false
+            this._audioWindowStart = 0
+            const prepared = await this.prepareAudio(range, method ?? 'spectral-tone')
             if (!prepared) {
                 return false
             }
+            return this._startPlayback()
         }
-        try {
-            this.dispatchPayloadEvent(AccRecording.EVENTS.AUDIO_PLAYBACK_STARTED, { position }, 'before')
-            await this._audio.play(position)
+        // No selection → stethoscope from `position`, played in bounded windows that continue automatically.
+        this._audioContinue = true
+        const started = await this._playStethoscopeWindow(position)
+        if (started) {
             this.isAudioPlaying = true
             this.dispatchPayloadEvent(AccRecording.EVENTS.AUDIO_PLAYBACK_STARTED, { position })
-            return true
-        } catch (err) {
-            Log.error(`Playing audio failed: ${(err as Error).message}`, SCOPE)
         }
-        return false
+        return started
     }
 
     async prepare (options?: UrlAccessOptions): Promise<boolean> {
@@ -693,9 +761,26 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
         return true
     }
 
+    async resumeAudio (): Promise<boolean> {
+        if (!this._audio.hasStarted) {
+            return false
+        }
+        try {
+            await this._audio.play(0)
+            this.isAudioPlaying = true
+            this.dispatchPayloadEvent(AccRecording.EVENTS.AUDIO_PLAYBACK_STARTED, { position: this.playbackPosition })
+            return true
+        } catch (err) {
+            Log.error(`Resuming audio failed: ${(err as Error).message}`, SCOPE)
+        }
+        return false
+    }
+
     rewindAudio (): boolean {
         try {
             this.dispatchEvent(AccRecording.EVENTS.AUDIO_PLAYBACK_STOPPED, 'before')
+            this._audioContinue = false
+            this._audioWindowStart = 0
             this._audio.stop()
             this.isAudioPlaying = false
             this.dispatchEvent(AccRecording.EVENTS.AUDIO_PLAYBACK_STOPPED)

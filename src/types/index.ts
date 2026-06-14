@@ -101,6 +101,11 @@ export interface AccResource extends BiosignalResource {
      */
     prepareAudio (range?: [number, number], method?: AudioSynthesisMethod): Promise<boolean>
     /**
+     * Resume playback paused with {@link pauseAudio}, without re-synthesising.
+     * @returns Whether playback resumed (false when nothing is paused).
+     */
+    resumeAudio (): Promise<boolean>
+    /**
      * Stop audio playback and rewind to the start.
      * @returns Whether it succeeded.
      */
