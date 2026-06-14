@@ -7,6 +7,7 @@
 
 import AccCascadeMontage from '#components/AccCascadeMontage'
 import AccEvent from '#components/AccEvent'
+import { AccEvents } from '#events'
 import AccLabel from '#components/AccLabel'
 import AccMontage from '#components/AccMontage'
 import AccMontageChannel from '#components/AccMontageChannel'
@@ -26,6 +27,7 @@ const modality = 'acc'
 export {
     AccCascadeMontage,
     AccEvent,
+    AccEvents,
     AccLabel,
     AccMontage,
     AccMontageChannel,
@@ -47,3 +49,4 @@ export type {
     AccSensorGroup,
     AccStudyContext,
 } from '#types'
+export type { AccModuleEvent } from '#events'

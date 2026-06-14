@@ -18,13 +18,16 @@
  */
 
 import {
+    BiosignalAudio,
     BiosignalMutex,
     GenericBiosignalResource,
     GenericBiosignalSetup,
+    getSynthesizer,
 } from '@epicurrents/core'
 import { AssetEvents, BiosignalResourceEvents } from '@epicurrents/core/dist/events'
 import { calculateSignalOffsets } from '@epicurrents/core/dist/util'
 import type {
+    AudioSynthesisMethod,
     BiosignalChannel,
     BiosignalChannelTemplate,
     BiosignalConfig,
@@ -45,6 +48,7 @@ import AccCascadeMontage from '#components/AccCascadeMontage'
 import AccMontage from '#components/AccMontage'
 import AccService from '#service/AccService'
 import AccSourceChannel from '#components/AccSourceChannel'
+import { AccEvents } from '#events'
 import {
     magnitudeDerivationsForGroups,
     parseSensorGroups,
@@ -79,8 +83,13 @@ function prettyGroupPrefix (groupId: string): string {
 }
 
 export default class AccRecording extends GenericBiosignalResource implements AccResource {
+    /** ACC recording events (not including property change events). */
+    static readonly EVENTS = { ...GenericBiosignalResource.EVENTS, ...AccEvents }
 
+    /** Player for the synthesised entrainment audio. */
+    protected _audio: BiosignalAudio
     protected _headers: BiosignalHeaderRecord
+    protected _isAudioPlaying = false
     protected _recMontageTemplate: BiosignalMontageTemplate | null = null
     protected _samplingRate: number | null = null
     protected _sensorGroups: AccSensorGroup[] = []
@@ -140,6 +149,12 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
         calculateSignalOffsets(this._channels)
         // Service owns the worker for the rest of the resource's lifetime.
         this._service = new AccService(this, fileWorker, this._memoryManager || undefined)
+        this._audio = new BiosignalAudio(name)
+        this._audio.addPlayEndedCallback(() => {
+            this.isAudioPlaying = false
+            this.dispatchEvent(AccRecording.EVENTS.AUDIO_PLAYBACK_ENDED)
+            this.dispatchEvent(AccRecording.EVENTS.AUDIO_PLAYBACK_STOPPED)
+        })
         this._samplingRate = header.maxSamplingRate || channels[0]?.samplingRate || 0
         this._dataDuration = header.dataDuration || header.duration || 0
         this._totalDuration = header.duration || this._dataDuration
@@ -217,6 +232,17 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
                 this.dispatchEvent(BiosignalResourceEvents.SIGNAL_CACHING_COMPLETE)
             }
         }, this.id)
+    }
+
+    get isAudioPlaying (): boolean {
+        return this._isAudioPlaying
+    }
+    set isAudioPlaying (playing: boolean) {
+        this._setPropertyValue('isAudioPlaying', playing)
+    }
+
+    get playbackPosition (): number {
+        return this._audio.currentTime
     }
 
     get sensorGroups (): AccSensorGroup[] {
@@ -424,6 +450,14 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
         )
     }
 
+    /**
+     * Index of the first magnitude-derivation channel (named `<group>_mag`) in the cached source signals, or -1 when
+     * the recording has no complete 3-axis group and therefore no magnitude to sonify.
+     */
+    protected _magnitudeSignalIndex (): number {
+        return this._channels.findIndex(channel => channel.name.endsWith('_mag'))
+    }
+
     async addCascadeMontagesFromEntries (entries: AccCascadeEntry[]): Promise<string[]> {
         if (!entries?.length || !this._setup) {
             return []
@@ -529,6 +563,11 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
         return created
     }
 
+    destroy (): Promise<void> {
+        this._audio.destroy()
+        return super.destroy()
+    }
+
     getMainProperties () {
         const props = super.getMainProperties()
         if (props.size) {
@@ -538,6 +577,50 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
             props.set('signals', this._channels.length)
         }
         return props
+    }
+
+    pauseAudio (): boolean {
+        try {
+            this.dispatchPayloadEvent(
+                AccRecording.EVENTS.AUDIO_PLAYBACK_PAUSED,
+                { position: this._audio.currentTime },
+                'before',
+            )
+            this._audio.pause()
+            this.isAudioPlaying = false
+            this.dispatchPayloadEvent(
+                AccRecording.EVENTS.AUDIO_PLAYBACK_PAUSED,
+                { position: this._audio.currentTime },
+            )
+            return true
+        } catch (err) {
+            Log.error(`Pausing audio failed: ${(err as Error).message}`, SCOPE)
+        }
+        return false
+    }
+
+    async playAudio (
+        position = 0,
+        range?: [number, number],
+        method?: AudioSynthesisMethod,
+    ): Promise<boolean> {
+        // (Re)synthesise when a selection or explicit method is supplied, or when nothing is loaded yet.
+        if (range !== undefined || method !== undefined || !this._audio.buffer) {
+            const prepared = await this.prepareAudio(range, method)
+            if (!prepared) {
+                return false
+            }
+        }
+        try {
+            this.dispatchPayloadEvent(AccRecording.EVENTS.AUDIO_PLAYBACK_STARTED, { position }, 'before')
+            await this._audio.play(position)
+            this.isAudioPlaying = true
+            this.dispatchPayloadEvent(AccRecording.EVENTS.AUDIO_PLAYBACK_STARTED, { position })
+            return true
+        } catch (err) {
+            Log.error(`Playing audio failed: ${(err as Error).message}`, SCOPE)
+        }
+        return false
     }
 
     async prepare (options?: UrlAccessOptions): Promise<boolean> {
@@ -571,5 +654,59 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
             await this._applyDefaultSetups()
         }
         return ok
+    }
+
+    /**
+     * Synthesise audio from the magnitude signal and load it into the player. Picks `spectral-tone` when a segment
+     * `range` is given (a steady tone from that clean window) and `stethoscope` otherwise (time-preserving
+     * sonification of the whole signal); an explicit `method` overrides the selection-based default.
+     * @param range - Optional [start, end] segment in seconds; when given, the default method becomes `spectral-tone`.
+     * @param method - Optional explicit synthesis method key, overriding the selection-based default.
+     * @returns Promise resolving true when a buffer was prepared, false when no magnitude signal is available.
+     */
+    async prepareAudio (range?: [number, number], method?: AudioSynthesisMethod): Promise<boolean> {
+        if (!this._service) {
+            return false
+        }
+        const magnitudeIndex = this._magnitudeSignalIndex()
+        if (magnitudeIndex < 0) {
+            Log.warn(`No magnitude derivation available for audio synthesis.`, SCOPE)
+            return false
+        }
+        const signalRange = range ?? [0, this._dataDuration]
+        const signals = await this._service.getSignals(signalRange)
+        const magnitude = signals?.signals[magnitudeIndex]?.data
+        if (!magnitude) {
+            Log.warn(`Magnitude signal could not be retrieved for audio synthesis.`, SCOPE)
+            return false
+        }
+        const chosenMethod: AudioSynthesisMethod = method ?? (range ? 'spectral-tone' : 'stethoscope')
+        const synthesizer = getSynthesizer(chosenMethod)
+        if (!synthesizer) {
+            Log.warn(`Unknown audio synthesis method '${chosenMethod}'.`, SCOPE)
+            return false
+        }
+        // stethoscope derives its (time-preserving) duration from the signal length; spectral-tone uses its own
+        // fixed sustain — so neither needs an explicit duration here.
+        const buffer = await synthesizer.synthesize([magnitude], this._samplingRate || 0)
+        this._audio.setBuffer(buffer)
+        return true
+    }
+
+    rewindAudio (): boolean {
+        try {
+            this.dispatchEvent(AccRecording.EVENTS.AUDIO_PLAYBACK_STOPPED, 'before')
+            this._audio.stop()
+            this.isAudioPlaying = false
+            this.dispatchEvent(AccRecording.EVENTS.AUDIO_PLAYBACK_STOPPED)
+            return true
+        } catch (err) {
+            Log.error(`Rewinding audio failed: ${(err as Error).message}`, SCOPE)
+        }
+        return false
+    }
+
+    setAudioGain (gain: number): void {
+        this._audio.setGain(gain)
     }
 }

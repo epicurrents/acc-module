@@ -6,6 +6,7 @@
  */
 
 import type {
+    AudioSynthesisMethod,
     BaseModuleSettings,
     BiosignalDataService,
     BiosignalLaterality,
@@ -55,6 +56,10 @@ export type AccSensorGroup = {
 }
 
 export interface AccResource extends BiosignalResource {
+    /** Whether the entrainment audio is currently playing. */
+    isAudioPlaying: boolean
+    /** Current audio playback position in seconds. */
+    playbackPosition: number
     /**
      * Sensor groups derived from the channel-label parse, populated during
      * `_applyDefaultSetups()`. Empty when no group resolves all three axes.
@@ -73,6 +78,38 @@ export interface AccResource extends BiosignalResource {
      *          entries whose candidates did not resolve are silently skipped.
      */
     addCascadeMontagesFromEntries (entries: AccCascadeEntry[]): Promise<string[]>
+    /**
+     * Pause audio playback.
+     * @returns Whether the pause succeeded.
+     */
+    pauseAudio (): boolean
+    /**
+     * Start audio playback from the given position, synthesising the buffer first when a selection or method is
+     * supplied or none is loaded yet. A `range` selects `spectral-tone`, its absence `stethoscope`.
+     * @param position - Playback start position in seconds (default 0).
+     * @param range - Optional selected segment in seconds; triggers (re)synthesis with `spectral-tone`.
+     * @param method - Optional explicit method override.
+     * @returns Whether playback started.
+     */
+    playAudio (position?: number, range?: [number, number], method?: AudioSynthesisMethod): Promise<boolean>
+    /**
+     * Synthesise audio from the magnitude signal and load it into the player. A `range` selects `spectral-tone`,
+     * its absence `stethoscope`; an explicit `method` overrides the default.
+     * @param range - Optional [start, end] segment in seconds.
+     * @param method - Optional explicit synthesis method key.
+     * @returns Whether a buffer was prepared (false when no magnitude signal is available).
+     */
+    prepareAudio (range?: [number, number], method?: AudioSynthesisMethod): Promise<boolean>
+    /**
+     * Stop audio playback and rewind to the start.
+     * @returns Whether it succeeded.
+     */
+    rewindAudio (): boolean
+    /**
+     * Set the audio gain.
+     * @param gain - Gain factor applied to the player output.
+     */
+    setAudioGain (gain: number): void
 }
 
 /**
