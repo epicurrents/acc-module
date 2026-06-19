@@ -28,7 +28,10 @@ const accSettings: AccModuleSettings = {
     filterChannelTypes: {
         acc: ['highpass', 'lowpass'],
     },
-    filterPaddingSeconds: 0.1,
+    // A low high-pass (the 0.5 Hz default that removes the gravity baseline) settles slowly, so it benefits from a
+    // couple of seconds of padding on each side for the per-page filter edges; the 0.1 s suited to fast EEG filters
+    // is too short. The gravity-offset start transient itself is handled in `filterSignal` (mean removal), not here.
+    filterPaddingSeconds: 2,
     // Empty by default — accelerometry has no canonical band taxonomy like the
     // EEG δ/θ/α/β set. The FftTool iterates this array to draw guideline bars
     // and compute per-band powers; an empty array suppresses both, leaving the
