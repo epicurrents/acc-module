@@ -672,7 +672,7 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
         // Tear down any current playback so the player re-arms from the freshly synthesised buffer.
         this._audio.stop()
         if (range !== undefined) {
-            // Selected segment → spectral-tone: a one-shot steady tone, no windowed continuation, no cursor follow.
+            // Selected segment → spectral-tone: a looping steady tone, no windowed continuation, no cursor follow.
             this._audioContinue = false
             this._audioWindowStart = 0
             const prepared = await this.prepareAudio(range, method ?? 'spectral-tone')
@@ -757,7 +757,9 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
         // stethoscope derives its (time-preserving) duration from the signal length; spectral-tone uses its own
         // fixed sustain — so neither needs an explicit duration here.
         const buffer = await synthesizer.synthesize([magnitude], this._samplingRate || 0)
-        this._audio.setBuffer(buffer)
+        // spectral-tone is a steady snapshot: loop it so it sustains until stopped. stethoscope evolves over time and
+        // auto-continues window by window, so it must not loop.
+        this._audio.setBuffer(buffer, chosenMethod === 'spectral-tone')
         return true
     }
 
