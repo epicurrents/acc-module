@@ -93,6 +93,13 @@ export interface AccResource extends BiosignalResource {
      */
     playAudio (position?: number, range?: [number, number], method?: AudioSynthesisMethod): Promise<boolean>
     /**
+     * Play a pre-synthesised buffer on a loop through the shared audio player. Pairs with
+     * {@link synthesizeSegment}: the caller renders the tone (and can draw its waveform), then hands it here.
+     * @param buffer - The rendered audio buffer to loop.
+     * @returns Whether playback started.
+     */
+    playBuffer (buffer: AudioBuffer): Promise<boolean>
+    /**
      * Synthesise audio from the magnitude signal and load it into the player. A `range` selects `spectral-tone`,
      * its absence `stethoscope`; an explicit `method` overrides the default.
      * @param range - Optional [start, end] segment in seconds.
@@ -115,6 +122,23 @@ export interface AccResource extends BiosignalResource {
      * @param gain - Gain factor applied to the player output.
      */
     setAudioGain (gain: number): void
+    /**
+     * Set the audio playback-rate multiplier live (1 = native). Shifts the pitch of a looping tone without
+     * re-rendering or restarting it.
+     * @param rate - Playback-rate multiplier (> 0).
+     */
+    setAudioPlaybackRate (rate: number): void
+    /**
+     * Synthesise a steady spectral tone from a pre-loaded signal segment and return the rendered buffer without
+     * playing it (the caller draws it and hands it to {@link playBuffer}). An explicit `speedUp` scales every peak
+     * by the same fixed multiplier so pitch tracks the tremor frequency; omitted falls back to the synthesizer's
+     * target fundamental.
+     * @param signal - Time-domain samples of the segment to sonify.
+     * @param samplingRate - Sampling rate of `signal` in Hz.
+     * @param speedUp - Fixed frequency multiplier.
+     * @returns The rendered buffer, or null when nothing could be synthesised.
+     */
+    synthesizeSegment (signal: Float32Array, samplingRate: number, speedUp?: number): Promise<AudioBuffer | null>
 }
 
 /**

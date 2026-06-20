@@ -40,6 +40,7 @@ import type {
     ConfigMapChannels,
     MemoryManager,
     SetupChannel,
+    SpectralToneSynthesisOptions,
     StudyContext,
     UrlAccessOptions,
 } from '@epicurrents/core/dist/types'
@@ -683,12 +684,66 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
         }
         // No selection → stethoscope from `position`, played in bounded windows that continue automatically.
         this._audioContinue = true
+        // The stethoscope is time-preserving — undo any speed-up the segment tone
+        // left on the shared player so it plays back at the recorded rate.
+        this._audio.setPlaybackRate(1)
         const started = await this._playStethoscopeWindow(position)
         if (started) {
             this.isAudioPlaying = true
             this.dispatchPayloadEvent(AccRecording.EVENTS.AUDIO_PLAYBACK_STARTED, { position })
         }
         return started
+    }
+
+    /**
+     * Synthesise a steady spectral tone from a pre-loaded signal segment and
+     * play it on a loop through the shared audio player. The caller (the
+     * analysis window) already holds the selected segment's samples, so unlike
+     * {@link playAudio} with a range this never re-reads them from the signal
+     * worker — sidestepping the bounds arithmetic on the read path entirely.
+     * @param signal - Time-domain samples of the segment to sonify.
+     * @param samplingRate - Sampling rate of `signal` in Hz.
+     */
+    /**
+     * Play a pre-synthesised buffer on a loop through the shared audio player.
+     * Pairs with {@link synthesizeSegment}: the analysis window renders the tone
+     * (so it can also draw its waveform) and hands the buffer here to play.
+     * @param buffer - The rendered audio buffer to loop.
+     */
+    async playBuffer (buffer: AudioBuffer): Promise<boolean> {
+        this._audio.stop()
+        this._audioContinue = false
+        this._audioWindowStart = 0
+        this._audio.setBuffer(buffer, true)
+        return this._startPlayback()
+    }
+
+    /**
+     * Synthesise a steady spectral tone from a pre-loaded signal segment and
+     * return the rendered buffer, without playing it (the caller draws it and
+     * hands it to {@link playBuffer}). An explicit `speedUp` scales every peak
+     * by the same fixed multiplier (peak × speedUp) instead of normalising the
+     * dominant peak to a target, so pitch tracks the tremor frequency (slow
+     * lower, fast higher) while multiple prominent peaks stack into a dissonant
+     * cluster.
+     * @param signal - Time-domain samples of the segment to sonify.
+     * @param samplingRate - Sampling rate of `signal` in Hz.
+     * @param speedUp - Fixed frequency multiplier; omitted falls back to the synthesizer's target fundamental.
+     */
+    async synthesizeSegment (
+        signal: Float32Array,
+        samplingRate: number,
+        speedUp?: number,
+    ): Promise<AudioBuffer | null> {
+        if (!signal?.length) {
+            return null
+        }
+        const synthesizer = getSynthesizer('spectral-tone')
+        if (!synthesizer) {
+            return null
+        }
+        const opts: SpectralToneSynthesisOptions = speedUp ? { speedUp } : {}
+        return synthesizer.synthesize([signal], samplingRate || this._samplingRate || 0, opts)
     }
 
     async prepare (options?: UrlAccessOptions): Promise<boolean> {
@@ -741,7 +796,21 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
             Log.warn(`No magnitude derivation available for audio synthesis.`, SCOPE)
             return false
         }
-        const signalRange = range ?? [0, this._dataDuration]
+        // Clamp the requested range to the readable data extent. A plot
+        // selection can reach the data end or slip just past it (pixel
+        // rounding, a drag into the trailing margin); the stethoscope path is
+        // already bounded by _dataDuration, but a passed-in segment is not, and
+        // reading past the cached buffer throws "offset is out of bounds" in
+        // the signal worker. (The old CSV reader's padded cache hid this; an
+        // EDF cache is sized exactly to the data.)
+        const dataEnd = this._dataDuration
+        const rangeStart = range ? Math.max(0, Math.min(range[0], dataEnd)) : 0
+        const rangeEnd = range ? Math.max(0, Math.min(range[1], dataEnd)) : dataEnd
+        if (rangeEnd <= rangeStart) {
+            Log.warn(`Audio synthesis range is empty after clamping to the data extent.`, SCOPE)
+            return false
+        }
+        const signalRange: [number, number] = [rangeStart, rangeEnd]
         const signals = await this._service.getSignals(signalRange)
         const magnitude = signals?.signals[magnitudeIndex]?.data
         if (!magnitude) {
@@ -764,7 +833,10 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
     }
 
     async resumeAudio (): Promise<boolean> {
-        if (!this._audio.hasStarted) {
+        // Only resume a paused stethoscope. After a segment tone (which loads its
+        // own looping buffer and clears continuation) there is nothing to resume,
+        // so the caller falls back to a fresh stethoscope window from the cursor.
+        if (!this._audio.hasStarted || !this._audioContinue) {
             return false
         }
         try {
@@ -795,5 +867,9 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
 
     setAudioGain (gain: number): void {
         this._audio.setGain(gain)
+    }
+
+    setAudioPlaybackRate (rate: number): void {
+        this._audio.setPlaybackRate(rate)
     }
 }
