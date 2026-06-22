@@ -100,6 +100,8 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
     protected _audioContinue = false
     /** Recording time (seconds) at which the currently loaded audio buffer begins. */
     protected _audioWindowStart = 0
+    /** Format-specific header (e.g. the EDF header) the reader worker needs at setup; null for CSV. */
+    protected _formatHeader: object | null = null
     protected _headers: BiosignalHeaderRecord
     protected _isAudioPlaying = false
     protected _recMontageTemplate: BiosignalMontageTemplate | null = null
@@ -139,6 +141,9 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
             Log.error(`ACC settings not found in the global Epicurrents runtime.`, SCOPE)
         }
         this._headers = header
+        if (config.formatHeader) {
+            this._formatHeader = config.formatHeader
+        }
         if (memoryManager && this.#SETTINGS?.useMemoryManager) {
             this.setMemoryManager(memoryManager)
         }
@@ -758,6 +763,7 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
             this._headers,
             this._source as StudyContext,
             options,
+            this._formatHeader || undefined,
         ).then(response => {
             if (response) {
                 this.totalDuration = response

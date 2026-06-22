@@ -48,6 +48,7 @@ export default class AccService extends GenericBiosignalService implements Biosi
         header: BiosignalHeaderRecord,
         study: StudyContext,
         options?: UrlAccessOptions,
+        formatHeader?: unknown,
     ) {
         const fileUrl = study.files.filter(f => f.role === 'data').map(file => file.url)[0]
         if (!fileUrl) {
@@ -62,6 +63,7 @@ export default class AccService extends GenericBiosignalService implements Biosi
                 ['header', header.serializable],
                 ['url', fileUrl],
                 ['authHeader', options?.authHeader || null],
+                ['formatHeader', formatHeader || null],
             ]),
         )
         return commission.promise as Promise<SetupStudyResponse>

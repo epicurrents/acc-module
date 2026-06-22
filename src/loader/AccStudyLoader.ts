@@ -18,6 +18,7 @@ import type {
     ConfigStudyLoader,
     FileFormatImporter,
     FileSystemItem,
+    SafeObject,
     StudyContext,
 } from '@epicurrents/core/dist/types'
 import AccRecording from '../AccRecording'
@@ -45,6 +46,7 @@ export default class AccStudyLoader extends BiosignalStudyLoader {
         }
         const meta = this._study.meta as {
             channels?: BiosignalChannel[]
+            formatHeader?: SafeObject
             header?: GenericBiosignalHeader
         }
         if (!this._study.name || !meta?.channels || !meta.header) {
@@ -66,6 +68,7 @@ export default class AccStudyLoader extends BiosignalStudyLoader {
             meta.header,
             worker,
             this._memoryManager || undefined,
+            { formatHeader: meta.formatHeader },
         )
         acc.source = this._study
         acc.state = 'loaded'
