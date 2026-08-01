@@ -1,21 +1,12 @@
 /**
- * Global property type declarations for the ACC module.
+ * Build-time global declarations. The Epicurrents application global (`window.__EPICURRENTS__` and
+ * its `EpicurrentsGlobal` type) is inherited from `@epicurrents/core`; only bundler-level globals
+ * are declared here.
  * @package    @epicurrents/acc-module
  * @copyright  2026 Sampsa Lohi
  * @license    Apache-2.0
  */
 
 /* eslint-disable */
-type EpicurrentsGlobal = {
-    APP: unknown | null
-    EVENT_BUS: import('scoped-event-bus').ScopedEventBus | null
-    RUNTIME: import('@epicurrents/core/dist/types/application').StateManager
-}
-
-declare global {
-    let __webpack_public_path__: string
-    interface Window {
-        __EPICURRENTS__: EpicurrentsGlobal
-    }
-}
-export {}
+/** Path where WebPack serves its public assets (js) from. */
+declare let __webpack_public_path__: string
