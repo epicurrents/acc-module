@@ -38,6 +38,7 @@ module.exports = {
             '#root': path.resolve(__dirname, './'),
             '#components': path.resolve(__dirname, 'src', 'components'),
             '#config': path.resolve(__dirname, 'src', 'config'),
+            '#events': path.resolve(__dirname, 'src', 'events'),
             '#loader': path.resolve(__dirname, 'src', 'loader'),
             '#runtime': path.resolve(__dirname, 'src', 'runtime'),
             '#service': path.resolve(__dirname, 'src', 'service'),
