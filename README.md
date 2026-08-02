@@ -38,8 +38,10 @@ Side-colour map
 
 Lowest-index match wins.  The mapped laterality flows into the emitted `SetupDerivation` so trace colours pick the correct side-colour theme automatically.
 
-Cascade montages
-----------------
+Montages and cascade view
+--------------------------
+
+By default the module's setup exposes the raw source channels plus a derived magnitude channel per sensor group, and montage selection uses regular multi-channel montages as for any biosignal modality.  The module additionally produces **cascade montages** as an optional feature — nothing is registered by default, so a consumer opts in by supplying entries.
 
 `AccRecording.addCascadeMontagesFromEntries(entries)` registers cascade montages declaratively.  Each entry:
 
@@ -55,7 +57,7 @@ Cascade montages
 }
 ```
 
-Candidates resolve against the setup's `derivations` first, then source channels — so `wrist_mag` (the magnitude derivation) wins over `wrist_x` when both are present.  Cascade rendering itself is handled by the modality-agnostic biosignal view in `viewer/interface/src/app/views/biosignal/overlays/` — no per-module UI code required.
+Candidates resolve against the setup's `derivations` first, then source channels — so `wrist_mag` (the magnitude derivation) wins over `wrist_x` when both are present.  This package ships no UI; the cascade montages it produces are rendered by whichever biosignal view the consumer provides.
 
 Public surface
 --------------
@@ -73,5 +75,5 @@ What's pending
 --------------
 
 - Platform-side integration: `.csv` upload acceptance and `'acc'` modality in the platform enum.
-- End-to-end verification against a real recording through the embedded viewer.
+- End-to-end verification against a real recording in a consuming application.
 - Optional default sensor-group catalog (wrist-only, wrist+ankle, etc.) if a host wants drop-in defaults beyond the `<group>_<axis>` parse.
