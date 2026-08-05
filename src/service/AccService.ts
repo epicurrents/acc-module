@@ -50,7 +50,8 @@ export default class AccService extends GenericBiosignalService implements Biosi
         options?: UrlAccessOptions,
         formatHeader?: unknown,
     ) {
-        const fileUrl = study.files.filter(f => f.role === 'data').map(file => file.url)[0]
+        const dataFile = study.files.filter(f => f.role === 'data')[0]
+        const fileUrl = dataFile?.url
         if (!fileUrl) {
             Log.error(`Cannot set up worker: study has no data file URL.`, SCOPE)
             return null as unknown as SetupStudyResponse
@@ -62,6 +63,10 @@ export default class AccService extends GenericBiosignalService implements Biosi
             new Map<string, unknown>([
                 ['header', header.serializable],
                 ['url', fileUrl],
+                // A study opened from the local file system carries the File itself alongside the
+                // object URL minted for it. Handing the File to the worker lets part reads slice it
+                // directly instead of fetching byte ranges from a `blob:` URL over the same bytes.
+                ['file', dataFile?.file || null],
                 ['authHeader', options?.authHeader || null],
                 ['formatHeader', formatHeader || null],
             ]),
