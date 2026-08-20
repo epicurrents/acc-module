@@ -25,6 +25,7 @@ export default class AccEvent extends GenericBiosignalEvent {
                 color: tpl.color as SettingsColor || undefined,
                 codes: tpl.codes || undefined,
                 label: tpl.label || undefined,
+                locked: tpl.locked || undefined,
                 opacity: tpl.opacity || undefined,
                 priority: tpl.priority || undefined,
                 text: tpl.text || undefined,

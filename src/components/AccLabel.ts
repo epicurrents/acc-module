@@ -18,6 +18,7 @@ export default class AccLabel extends ResourceLabel {
             class: tpl.class || undefined,
             codes: tpl.codes || undefined,
             label: tpl.label || undefined,
+            locked: tpl.locked || undefined,
             priority: tpl.priority || undefined,
             text: tpl.text || undefined,
             visible: tpl.visible || undefined,
