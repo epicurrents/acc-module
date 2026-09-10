@@ -159,6 +159,8 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
                 ch,
             ))
         }
+        // Raw-mode channel edits reach the plot through the resource, so relay them from here.
+        this._relaySourceChannelChanges(this._channels)
         // ACC source channels render raw (no montage), so the
         // `GenericBiosignalMontage` path that normally distributes baseline
         // offsets never runs. Place each source channel at an equal vertical
@@ -351,6 +353,7 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
         this._recMontageTemplate = this._buildRecMontageTemplate(groups, derivByGroup)
         // Also expose the magnitude derivations as source channels so the raw
         // (no-montage) view shows them too. Mirrors the cache slot layout.
+        const derivedFrom = this._channels.length
         for (let i = 0; i < derivations.length; i++) {
             const deriv = derivations[i]
             this._channels.push(new AccSourceChannel(
@@ -363,6 +366,7 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
                 { laterality: deriv.laterality },
             ))
         }
+        this._relaySourceChannelChanges(this._channels.slice(derivedFrom))
         calculateSignalOffsets(this._channels)
         Log.debug(
             `ACC setup applied: ${groups.length} sensor group(s), ` +
