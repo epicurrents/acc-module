@@ -5,7 +5,7 @@
  * @license    Apache-2.0
  */
 
-import type { BroadcastStateEvent, EventWithPayload } from '@epicurrents/core/dist/types/event'
+import type { BroadcastStateEvent, EventWithPayload } from '@epicurrents/core/types'
 
 /**
  * ACC module events.

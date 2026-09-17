@@ -6,7 +6,7 @@
  */
 
 import { ResourceLabel } from '@epicurrents/core'
-import type { AnnotationLabelTemplate, AnnotationOptions } from '@epicurrents/core/dist/types'
+import type { AnnotationLabelTemplate, AnnotationOptions } from '@epicurrents/core/types'
 
 const SCOPE = 'AccLabel'
 

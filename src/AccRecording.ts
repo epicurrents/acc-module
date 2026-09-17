@@ -24,8 +24,8 @@ import {
     GenericBiosignalSetup,
     getSynthesizer,
 } from '@epicurrents/core'
-import { AssetEvents, BiosignalResourceEvents } from '@epicurrents/core/dist/events'
-import { calculateSignalOffsets } from '@epicurrents/core/dist/util'
+import { AssetEvents, BiosignalResourceEvents } from '@epicurrents/core/events'
+import { calculateSignalOffsets } from '@epicurrents/core/util'
 import type {
     AudioSynthesisMethod,
     BiosignalChannel,
@@ -43,7 +43,7 @@ import type {
     SpectralToneSynthesisOptions,
     StudyContext,
     UrlAccessOptions,
-} from '@epicurrents/core/dist/types'
+} from '@epicurrents/core/types'
 import { Log } from 'scoped-event-log'
 import AccCascadeMontage from '#components/AccCascadeMontage'
 import AccMontage from '#components/AccMontage'

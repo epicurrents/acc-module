@@ -13,7 +13,7 @@ import type {
     BiosignalResource,
     CommonBiosignalSettings,
     StudyContext,
-} from '@epicurrents/core/dist/types'
+} from '@epicurrents/core/types'
 
 export interface AccDataService extends BiosignalDataService {}
 

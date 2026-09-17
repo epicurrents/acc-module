@@ -20,7 +20,7 @@ import type {
     FileSystemItem,
     SafeObject,
     StudyContext,
-} from '@epicurrents/core/dist/types'
+} from '@epicurrents/core/types'
 import AccRecording from '../AccRecording'
 import type { AccResource } from '#types'
 import { Log } from 'scoped-event-log'

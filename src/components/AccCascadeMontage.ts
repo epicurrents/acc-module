@@ -20,7 +20,7 @@ import type {
     MemoryManager,
     MontageChannel,
     SetupChannel,
-} from '@epicurrents/core/dist/types'
+} from '@epicurrents/core/types'
 import AccMontageChannel from './AccMontageChannel'
 import type { AccResource } from '#types'
 

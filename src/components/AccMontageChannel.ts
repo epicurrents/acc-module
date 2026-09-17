@@ -17,7 +17,7 @@ import type {
     BiosignalMontage,
     DerivedChannelProperties,
     MontageChannel,
-} from '@epicurrents/core/dist/types'
+} from '@epicurrents/core/types'
 
 export default class AccMontageChannel extends GenericMontageChannel implements MontageChannel {
 

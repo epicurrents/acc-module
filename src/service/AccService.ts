@@ -20,7 +20,7 @@ import type {
     StudyContext,
     UrlAccessOptions,
     WorkerResponse,
-} from '@epicurrents/core/dist/types'
+} from '@epicurrents/core/types'
 import { Log } from 'scoped-event-log'
 
 const SCOPE = 'AccService'

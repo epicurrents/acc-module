@@ -15,7 +15,7 @@ import type {
     BiosignalLaterality,
     SetupDerivation,
     SourceChannel,
-} from '@epicurrents/core/dist/types'
+} from '@epicurrents/core/types'
 import type { AccSensorGroup } from '#types'
 
 /**
