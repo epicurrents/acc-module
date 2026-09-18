@@ -171,8 +171,8 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
         this._audio = new BiosignalAudio(name)
         this._audio.addPlayEndedCallback(() => this._onAudioEnded())
         this._samplingRate = header.maxSamplingRate || channels[0]?.samplingRate || 0
-        this._dataDuration = header.dataDuration || header.duration || 0
-        this._totalDuration = header.duration || this._dataDuration
+        this._dataDuration = header.dataDuration || 0
+        this._totalDuration = header.totalDuration || this._dataDuration
         this._startTime = header.recordingStartTime ?? null
         this._state = 'loading'
         this.addEventListener(AssetEvents.DEACTIVATE, async () => {
