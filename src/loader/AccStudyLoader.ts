@@ -77,25 +77,42 @@ export default class AccStudyLoader extends BiosignalStudyLoader {
         return acc
     }
 
-    async loadFromDirectory (dir: FileSystemItem, config?: ConfigStudyLoader): Promise<StudyContext | null> {
-        const context = await super.loadFromDirectory(dir, config)
-        if (!context) {
+    /**
+     * Narrow a loaded study to the ACC modality. The format importers are modality-agnostic and
+     * stamp their data files as a generic `signal`, so every loading path has to narrow both the
+     * study and its data files — anything looking a data file up by modality finds nothing
+     * otherwise, and an unstamped study falls back to the `unknown` of the context template.
+     */
+    protected _claimAsAcc (study: StudyContext | null): StudyContext | null {
+        if (!study) {
             return null
         }
-        context.modality = 'acc'
-        return context
+        study.modality = 'acc'
+        for (const file of study.files) {
+            if (file.modality === 'signal') {
+                file.modality = 'acc'
+            }
+        }
+        return study
+    }
+
+    async loadFromDirectory (dir: FileSystemItem, config?: ConfigStudyLoader): Promise<StudyContext | null> {
+        return this._claimAsAcc(await super.loadFromDirectory(dir, config))
+    }
+
+    async loadFromFile (
+        file: File,
+        config?: ConfigStudyLoader,
+        preStudy?: StudyContext,
+    ): Promise<StudyContext | null> {
+        return this._claimAsAcc(await super.loadFromFile(file, config, preStudy))
     }
 
     async loadFromUrl (
         fileUrl: string,
         config?: ConfigStudyLoader,
-        preStudy?: StudyContext | undefined,
+        preStudy?: StudyContext,
     ): Promise<StudyContext | null> {
-        const context = await super.loadFromUrl(fileUrl, config, preStudy)
-        if (!context) {
-            return null
-        }
-        context.modality = 'acc'
-        return context
+        return this._claimAsAcc(await super.loadFromUrl(fileUrl, config, preStudy))
     }
 }

@@ -12,7 +12,6 @@
 
 import { GenericBiosignalService } from '@epicurrents/core'
 import type {
-    BiosignalDataService,
     BiosignalHeaderRecord,
     BiosignalResource,
     MemoryManager,
@@ -21,11 +20,12 @@ import type {
     UrlAccessOptions,
     WorkerResponse,
 } from '@epicurrents/core/types'
+import type { AccDataService } from '#types'
 import { Log } from 'scoped-event-log'
 
 const SCOPE = 'AccService'
 
-export default class AccService extends GenericBiosignalService implements BiosignalDataService {
+export default class AccService extends GenericBiosignalService implements AccDataService {
 
     constructor (recording: BiosignalResource, worker: Worker, manager?: MemoryManager) {
         super(recording, worker, manager)
@@ -54,7 +54,7 @@ export default class AccService extends GenericBiosignalService implements Biosi
         const fileUrl = dataFile?.url
         if (!fileUrl) {
             Log.error(`Cannot set up worker: study has no data file URL.`, SCOPE)
-            return null as unknown as SetupStudyResponse
+            return 0
         }
         Log.info(`Loading ACC study ${study.name} in worker.`, SCOPE)
         this._initWaiters('setup-worker')
