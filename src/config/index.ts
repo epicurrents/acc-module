@@ -23,8 +23,13 @@ const accSettings: AccModuleSettings = {
     // Modality → list of filter types whose recording-level default propagates
     // to channels of that modality. Without an entry for `'acc'`, the helper
     // `getChannelFilters` falls back to each channel's own (zero) filter value
-    // and the recording-level `filters.highpass`/`lowpass`/`notch` set via the
-    // controls silently never reach the worker.
+    // and the recording-level `filters.highpass`/`lowpass` set via the controls
+    // silently never reach the worker.
+    //
+    // Notch is absent by design and not by omission: a notch filter exists to remove mains
+    // interference coupled into a voltage measurement, and an accelerometer measures acceleration,
+    // which mains hum does not produce. The runtime module declares no `'notch-filter'` branch for
+    // the same reason.
     filterChannelTypes: {
         acc: ['highpass', 'lowpass'],
     },

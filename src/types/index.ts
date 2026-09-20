@@ -15,11 +15,13 @@ import type {
     StudyContext,
 } from '@epicurrents/core/types'
 
-export interface AccDataService extends BiosignalDataService {}
+/** The service contract an ACC resource's data service fulfils. Accelerometry adds no members of
+ * its own, so this is core's biosignal service surface under the name the module exports. */
+export type AccDataService = BiosignalDataService
 
 /**
  * Sampling-rate convention for accelerometry magnitude — same as the inputs
- * (Phase 1's pipeline materialises one sample per input sample). No upsampling.
+ * (core's pipeline materialises one sample per input sample). No upsampling.
  */
 export type AccModuleSettings = BaseModuleSettings & CommonBiosignalSettings & {
     /**
@@ -53,6 +55,12 @@ export type AccSensorGroup = {
     axes: { x: number | null, y: number | null, z: number | null }
     /** Common sampling rate of the group's axes. Zero when inconsistent or missing. */
     samplingRate: number
+    /**
+     * Display unit shared by the group's axes, empty when they disagree or declare none. Samples
+     * are stored in SI regardless; this is the unit a consumer renders against, and a derived
+     * signal has to carry the same one as its inputs to share their scale.
+     */
+    unit: string
 }
 
 export interface AccResource extends BiosignalResource {
@@ -69,9 +77,8 @@ export interface AccResource extends BiosignalResource {
      * Register a cascade montage per entry. The first candidate name that
      * resolves against the recording's setup (matched on derivations first,
      * then on source channels by either `name` or `label`) wins; per-entry
-     * display defaults (`sensitivity`, `highpass`, `lowpass`, `notch`) are
-     * applied to the created cascade so the initial view is usable without
-     * further fiddling. ACC only ever has one setup, so the lookup runs
+     * display defaults (`sensitivity`, `highpass`, `lowpass`) are applied to the
+     * created cascade so the initial view is usable without further fiddling. ACC only ever has one setup, so the lookup runs
      * directly against `this.setup`.
      * @param entries - Declarative cascade definitions; see {@link AccCascadeEntry}.
      * @returns The list of cascade montage names that were actually added —
@@ -182,6 +189,4 @@ export type AccCascadeEntry = {
     highpass?: number
     /** Initial lowpass filter (Hz). Optional. */
     lowpass?: number
-    /** Initial notch filter (Hz). Optional. */
-    notch?: number
 }

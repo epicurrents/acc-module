@@ -1,136 +1,220 @@
 /**
- * Tests for AccRecording.addCascadeMontagesFromEntries — the declarative API
- * that turns a list of candidate-source names + display settings into
- * `AccCascadeMontage` instances. Verifies the candidate-resolution priority
- * (derivations before source channels), per-entry display defaults, and the
- * idempotency guard against duplicate names.
+ * Tests for `AccRecording.addCascadeMontagesFromEntries` — the declarative API that turns a list of
+ * candidate-source names plus display settings into `AccCascadeMontage` instances.
+ *
+ * The method is exercised through `AccRecording.prototype`, bound to a stub carrying only the members
+ * it reads. Constructing a real resource would pull in the worker, the memory manager and the whole
+ * activation lifecycle, none of which this method touches.
  *
  * @package    epicurrents/acc-module
  * @copyright  2026 Sampsa Lohi
  * @license    Apache-2.0
  */
 
-import { Log } from 'scoped-event-log'
+import AccRecording from '../src/AccRecording'
 import type { AccCascadeEntry } from '../src/types'
 
 vi.mock('scoped-event-log', () => ({
     Log: { debug: vi.fn(), error: vi.fn(), warn: vi.fn(), info: vi.fn() },
 }))
 
-// Minimal mock setup: only the fields `addCascadeMontagesFromEntries` reads.
-const makeSetup = (
-    channels: Array<{ name: string, label: string }>,
-    derivations: Array<{ name: string, label: string }> = [],
-) => ({
-    name: 'acc',
-    channels: channels.map(c => ({ ...c, modality: 'acc' })),
-    derivations,
+/** A montage stand-in recording the display settings the method applies to it. */
+const makeMontage = (name: string) => ({
+    name,
+    sensitivity: -1,
+    setHighpassFilter: vi.fn().mockResolvedValue(undefined),
+    setLowpassFilter: vi.fn().mockResolvedValue(undefined),
 })
 
 /**
- * Stand-alone re-implementation of the cascade-entry resolution logic for
- * test purposes. Mirrors the candidate-priority + display-settings shape so
- * we can pin the behaviour without booting the whole resource lifecycle.
+ * Build a `this` carrying the members `addCascadeMontagesFromEntries` reads: the setup it resolves
+ * candidates against, the montage list it checks for duplicates, and the `addCascadeMontage` it
+ * delegates creation to.
  */
-function resolveEntries(
-    entries: AccCascadeEntry[],
-    setup: ReturnType<typeof makeSetup>,
-    addedNames: Set<string> = new Set(),
-): Array<{ entry: AccCascadeEntry, source: string | null }> {
-    return entries.map(entry => {
-        const montageName = `cascade:${entry.id}`
-        if (addedNames.has(montageName)) {
-            return { entry, source: null }
+const makeContext = (options: {
+    channels?: Array<{ name: string, label: string }>
+    derivations?: Array<{ name: string, label: string }>
+    existingMontages?: string[]
+    createReturns?: (name: string) => ReturnType<typeof makeMontage> | null
+} = {}) => {
+    const created: Array<ReturnType<typeof makeMontage>> = []
+    const addCascadeMontage = vi.fn((name: string) => {
+        const montage = options.createReturns ? options.createReturns(name) : makeMontage(name)
+        if (montage) {
+            created.push(montage)
         }
-        const inDerivations = entry.candidates.find(c =>
-            setup.derivations.some(d => d.name === c || d.label === c),
-        )
-        const inChannels = entry.candidates.find(c =>
-            setup.channels.some(chan => chan.name === c || chan.label === c),
-        )
-        const source = inDerivations ?? inChannels ?? null
-        return { entry, source }
+        return Promise.resolve(montage)
     })
+    const context = {
+        _setup: {
+            name: 'acc',
+            channels: (options.channels ?? []).map(c => ({ ...c, modality: 'acc' })),
+            derivations: options.derivations,
+        },
+        montages: (options.existingMontages ?? []).map(name => ({ name })),
+        addCascadeMontage,
+    }
+    return { context, addCascadeMontage, created }
 }
 
-describe('addCascadeMontagesFromEntries resolution', () => {
+const entry = (over: Partial<AccCascadeEntry> = {}): AccCascadeEntry => ({
+    id: 'wrist',
+    label: 'Wrist',
+    candidates: ['wrist_mag', 'wrist_x'],
+    rowCount: 4,
+    pageLength: 30,
+    ...over,
+})
+
+/** Invoke the real method against a stub context. */
+const run = (context: object, entries: AccCascadeEntry[]) =>
+    (AccRecording.prototype.addCascadeMontagesFromEntries as (
+        this: unknown, e: AccCascadeEntry[],
+    ) => Promise<string[]>).call(context, entries)
+
+describe('addCascadeMontagesFromEntries candidate resolution', () => {
     beforeEach(() => { vi.clearAllMocks() })
 
-    it('prefers a magnitude derivation over a source channel of the same group', () => {
-        const setup = makeSetup(
-            [{ name: 'wrist_x', label: 'wrist_x' }],
-            [{ name: 'wrist_mag', label: 'Wrist |a|' }],
-        )
-        const entries: AccCascadeEntry[] = [
-            { id: 'wrist', label: 'Wrist', candidates: ['wrist_mag', 'wrist_x'], rowCount: 4, pageLength: 30 },
-        ]
-        const resolved = resolveEntries(entries, setup)
-        expect(resolved[0].source).toBe('wrist_mag')
+    it('prefers a derivation over a source channel of the same group', async () => {
+        const { context, addCascadeMontage } = makeContext({
+            channels: [{ name: 'wrist_x', label: 'wrist_x' }],
+            derivations: [{ name: 'wrist_mag', label: 'Wrist |a|' }],
+        })
+        const added = await run(context, [entry()])
+        expect(added).toEqual(['cascade:wrist'])
+        expect(addCascadeMontage.mock.calls[0][3]).toBe('wrist_mag')
     })
 
-    it('falls back to a source channel when no derivation matches', () => {
-        const setup = makeSetup([
-            { name: 'wrist_x', label: 'wrist_x' },
-            { name: 'wrist_y', label: 'wrist_y' },
-            { name: 'wrist_z', label: 'wrist_z' },
-        ])
-        const entries: AccCascadeEntry[] = [
-            { id: 'wrist', label: 'Wrist', candidates: ['wrist_mag', 'wrist_x'], rowCount: 4, pageLength: 30 },
-        ]
-        const resolved = resolveEntries(entries, setup)
-        expect(resolved[0].source).toBe('wrist_x')
+    it('falls back to a source channel when no derivation matches', async () => {
+        const { context, addCascadeMontage } = makeContext({
+            channels: [
+                { name: 'wrist_x', label: 'wrist_x' },
+                { name: 'wrist_y', label: 'wrist_y' },
+            ],
+        })
+        await run(context, [entry()])
+        expect(addCascadeMontage.mock.calls[0][3]).toBe('wrist_x')
     })
 
-    it('matches candidates by either name or label', () => {
-        const setup = makeSetup(
-            [],
-            [{ name: 'wrist_mag', label: 'Wrist |a|' }],
-        )
-        const byName = resolveEntries(
-            [{ id: 'w1', label: 'Wrist', candidates: ['wrist_mag'], rowCount: 4, pageLength: 30 }],
-            setup,
-        )[0].source
-        const byLabel = resolveEntries(
-            [{ id: 'w2', label: 'Wrist', candidates: ['Wrist |a|'], rowCount: 4, pageLength: 30 }],
-            setup,
-        )[0].source
-        expect(byName).toBe('wrist_mag')
-        expect(byLabel).toBe('Wrist |a|')
+    it('matches a candidate by label as well as by name', async () => {
+        const { context, addCascadeMontage } = makeContext({
+            derivations: [{ name: 'wrist_mag', label: 'Wrist |a|' }],
+        })
+        await run(context, [entry({ candidates: ['Wrist |a|'] })])
+        expect(addCascadeMontage.mock.calls[0][3]).toBe('Wrist |a|')
     })
 
-    it('picks the first candidate in priority order when several would match', () => {
-        const setup = makeSetup(
-            [],
-            [
+    it('takes the earliest candidate when several would resolve', async () => {
+        const { context, addCascadeMontage } = makeContext({
+            derivations: [
                 { name: 'wrist_mag', label: 'Wrist |a|' },
                 { name: 'ankle_mag', label: 'Ankle |a|' },
             ],
-        )
-        const entries: AccCascadeEntry[] = [
-            { id: 'mag', label: 'Magnitude', candidates: ['ankle_mag', 'wrist_mag'], rowCount: 4, pageLength: 30 },
-        ]
-        expect(resolveEntries(entries, setup)[0].source).toBe('ankle_mag')
+        })
+        await run(context, [entry({ candidates: ['ankle_mag', 'wrist_mag'] })])
+        expect(addCascadeMontage.mock.calls[0][3]).toBe('ankle_mag')
     })
 
-    it('returns a null source when no candidate resolves', () => {
-        const setup = makeSetup([{ name: 'wrist_x', label: 'wrist_x' }])
-        const entries: AccCascadeEntry[] = [
-            { id: 'ankle', label: 'Ankle', candidates: ['ankle_mag'], rowCount: 4, pageLength: 30 },
-        ]
-        expect(resolveEntries(entries, setup)[0].source).toBe(null)
+    it('skips an entry whose candidates do not resolve, without creating a montage', async () => {
+        const { context, addCascadeMontage } = makeContext({
+            channels: [{ name: 'wrist_x', label: 'wrist_x' }],
+        })
+        const added = await run(context, [entry({ id: 'ankle', candidates: ['ankle_mag'] })])
+        expect(added).toEqual([])
+        expect(addCascadeMontage).not.toHaveBeenCalled()
     })
 
-    it('skips an entry whose cascade name is already registered', () => {
-        const setup = makeSetup(
-            [],
-            [{ name: 'wrist_mag', label: 'Wrist |a|' }],
-        )
-        const entries: AccCascadeEntry[] = [
-            { id: 'wrist', label: 'Wrist', candidates: ['wrist_mag'], rowCount: 4, pageLength: 30 },
-        ]
-        const alreadyAdded = new Set(['cascade:wrist'])
-        const resolved = resolveEntries(entries, setup, alreadyAdded)
-        // Source is reported as null when the name is taken — caller should skip.
-        expect(resolved[0].source).toBe(null)
+    it('skips an entry whose cascade name is already registered', async () => {
+        const { context, addCascadeMontage } = makeContext({
+            derivations: [{ name: 'wrist_mag', label: 'Wrist |a|' }],
+            existingMontages: ['cascade:wrist'],
+        })
+        const added = await run(context, [entry()])
+        expect(added).toEqual([])
+        expect(addCascadeMontage).not.toHaveBeenCalled()
+    })
+
+    it('resolves against source channels when the setup declares no derivations', async () => {
+        const { context, addCascadeMontage } = makeContext({
+            channels: [{ name: 'wrist_x', label: 'wrist_x' }],
+        })
+        await run(context, [entry({ candidates: ['wrist_x'] })])
+        expect(addCascadeMontage.mock.calls[0][3]).toBe('wrist_x')
+    })
+
+    it('returns an empty list for no entries and for a resource without a setup', async () => {
+        const { context } = makeContext({ derivations: [{ name: 'wrist_mag', label: 'Wrist |a|' }] })
+        expect(await run(context, [])).toEqual([])
+        expect(await run({ ...context, _setup: null }, [entry()])).toEqual([])
+    })
+
+    it('omits an entry from the result when montage creation returns null', async () => {
+        const { context } = makeContext({
+            derivations: [{ name: 'wrist_mag', label: 'Wrist |a|' }],
+            createReturns: () => null,
+        })
+        expect(await run(context, [entry()])).toEqual([])
+    })
+
+    it('carries the entry label, row count and page length into the creation call', async () => {
+        const { context, addCascadeMontage } = makeContext({
+            derivations: [{ name: 'wrist_mag', label: 'Wrist |a|' }],
+        })
+        await run(context, [entry({ rowCount: 6, pageLength: 15 })])
+        const call = addCascadeMontage.mock.calls[0]
+        expect(call[0]).toBe('cascade:wrist')
+        expect(call[1]).toBe('Wrist')
+        expect(call[4]).toBe(6)
+        expect(call[5]).toBe(15)
+    })
+
+    it('adds every resolving entry of a multi-entry list', async () => {
+        const { context } = makeContext({
+            derivations: [
+                { name: 'wrist_mag', label: 'Wrist |a|' },
+                { name: 'ankle_mag', label: 'Ankle |a|' },
+            ],
+        })
+        const added = await run(context, [
+            entry({ id: 'wrist', candidates: ['wrist_mag'] }),
+            entry({ id: 'nope', candidates: ['missing'] }),
+            entry({ id: 'ankle', candidates: ['ankle_mag'] }),
+        ])
+        expect(added).toEqual(['cascade:wrist', 'cascade:ankle'])
+    })
+})
+
+describe('addCascadeMontagesFromEntries display settings', () => {
+    beforeEach(() => { vi.clearAllMocks() })
+
+    const withDerivation = () => makeContext({
+        derivations: [{ name: 'wrist_mag', label: 'Wrist |a|' }],
+    })
+
+    it('applies every supplied display setting to the created montage', async () => {
+        const { context, created } = withDerivation()
+        await run(context, [entry({ sensitivity: 250, highpass: 0.5, lowpass: 20 })])
+        const montage = created[0]
+        expect(montage.sensitivity).toBe(250)
+        expect(montage.setHighpassFilter).toHaveBeenCalledWith(0.5)
+        expect(montage.setLowpassFilter).toHaveBeenCalledWith(20)
+    })
+
+    it('leaves a setting the entry omits untouched', async () => {
+        const { context, created } = withDerivation()
+        await run(context, [entry()])
+        const montage = created[0]
+        expect(montage.sensitivity).toBe(-1)
+        expect(montage.setHighpassFilter).not.toHaveBeenCalled()
+        expect(montage.setLowpassFilter).not.toHaveBeenCalled()
+    })
+
+    it('applies a zero filter, which disables that filter rather than meaning "unset"', async () => {
+        const { context, created } = withDerivation()
+        await run(context, [entry({ sensitivity: 0, highpass: 0, lowpass: 0 })])
+        const montage = created[0]
+        expect(montage.sensitivity).toBe(0)
+        expect(montage.setHighpassFilter).toHaveBeenCalledWith(0)
+        expect(montage.setLowpassFilter).toHaveBeenCalledWith(0)
     })
 })

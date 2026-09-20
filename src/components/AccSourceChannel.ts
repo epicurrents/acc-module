@@ -16,9 +16,10 @@ export default class AccSourceChannel extends GenericSourceChannel {
         index: number,
         samplingRate: number,
         visible: boolean,
-        // Physical unit defaults to `'g'` because accelerometer files most
-        // commonly come in g; `getSignalScale('g') = 9.80665` normalises to
-        // m/s² on decode (extended in Phase 2 core util).
+        // Physical unit defaults to `'g'` because accelerometer files most commonly come in g.
+        // This is the display unit: samples are normalised to SI on decode, which for g means
+        // `getSignalScale('g') = 9.80665`. A reader that skips that scaling leaves the channel
+        // holding g while every consumer reads it as m/s².
         unit = 'g',
         extraProperties: Partial<BiosignalChannel> = {},
     ) {

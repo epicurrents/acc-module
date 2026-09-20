@@ -1,7 +1,7 @@
 /**
  * Unit tests for the ACC module's sensor-group parser and magnitude-derivation
  * projector — the pure helpers `AccRecording._applyDefaultSetups` composes to
- * turn channel labels into Phase 1 `SetupDerivation` entries.
+ * turn channel labels into the `SetupDerivation` entries core materialises.
  *
  * @package    epicurrents/acc-module
  * @copyright  2026 Sampsa Lohi
@@ -104,6 +104,29 @@ describe('parseSensorGroups', () => {
         expect(groups[0].samplingRate).toBe(0)
     })
 
+    it('groups channels case-insensitively', () => {
+        const groups = parseSensorGroups([
+            ch('Wrist_x', 0), ch('wrist_y', 1), ch('WRIST_z', 2),
+        ])
+        expect(groups).toHaveLength(1)
+        expect(groups[0].id).toBe('wrist')
+        expect(groups[0].axes).toEqual({ x: 0, y: 1, z: 2 })
+    })
+
+    it('labels a group from the first spelling it saw', () => {
+        expect(parseSensorGroups([ch('WRIST_x', 0), ch('wrist_y', 1)])[0].label).toBe('Wrist')
+    })
+
+    it('reports the unit shared by the axes', () => {
+        expect(parseSensorGroups([ch('wrist_x', 0), ch('wrist_y', 1)])[0].unit).toBe('g')
+    })
+
+    it('empties the unit when the axes disagree on one', () => {
+        const mixed = [ch('wrist_x', 0), ch('wrist_y', 1)]
+        mixed[1].unit = 'm/s²'
+        expect(parseSensorGroups(mixed)[0].unit).toBe('')
+    })
+
     it('honours a custom pattern', () => {
         const groups = parseSensorGroups(
             [
@@ -159,8 +182,28 @@ describe('magnitudeDerivationsForGroups', () => {
         const dv = magnitudeDerivationsForGroups(groups)[0]
         expect(dv.laterality).toBe('s')
         expect(dv.samplingRate).toBe(100)
-        expect(dv.unit).toBe('m/s²')
+        expect(dv.unit).toBe('g')
         expect(dv.label).toBe('Leftwrist |a|')
+    })
+
+    it('skips a group whose axes do not share a sampling rate', () => {
+        // Core reads every active input at the same sample index, so mismatched rates combine
+        // samples from different instants. Emitting with `samplingRate: 0` would not stop it —
+        // core treats a zero as "infer from the first input" rather than as a refusal.
+        const groups = parseSensorGroups([
+            ch('wrist_x', 0, 100),
+            ch('wrist_y', 1, 200),
+            ch('wrist_z', 2, 100),
+        ])
+        expect(groups[0].axes).toEqual({ x: 0, y: 1, z: 2 })
+        expect(magnitudeDerivationsForGroups(groups)).toEqual([])
+    })
+
+    it('carries the group unit rather than naming a unit of its own', () => {
+        const groups = parseSensorGroups([ch('wrist_x', 0), ch('wrist_y', 1), ch('wrist_z', 2)])
+        // Materialisation is a plain root-sum-of-squares, so a differing unit would only put the
+        // derived row on a different display scale from the axes it was computed from.
+        expect(magnitudeDerivationsForGroups(groups)[0].unit).toBe('g')
     })
 
     it('returns an empty list when no groups resolve', () => {

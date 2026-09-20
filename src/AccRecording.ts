@@ -6,7 +6,7 @@
  * CSV importer hands over via `study.meta`; `prepare()` then awaits the
  * worker's parse-and-acknowledge round trip before calling
  * {@link AccRecording._applyDefaultSetups}, which declares one
- * `SetupDerivation` per resolved three-axis sensor group. Phase 1's
+ * `SetupDerivation` per resolved three-axis sensor group. Core's
  * materialisation pipeline picks those derivations up automatically: memory
  * budget accounts for them, the worker allocates a cache slot per derivation,
  * and `_materialiseDerivation` computes `sqrt(x² + y² + z²)` sample-by-sample
@@ -25,7 +25,7 @@ import {
     getSynthesizer,
 } from '@epicurrents/core'
 import { AssetEvents, BiosignalResourceEvents } from '@epicurrents/core/events'
-import { calculateSignalOffsets } from '@epicurrents/core/util'
+import { calculateSignalOffsets, INDEX_NOT_ASSIGNED } from '@epicurrents/core/util'
 import type {
     AudioSynthesisMethod,
     BiosignalChannel,
@@ -105,6 +105,12 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
     protected _headers: BiosignalHeaderRecord
     protected _isAudioPlaying = false
     protected _recMontageTemplate: BiosignalMontageTemplate | null = null
+    /**
+     * Number of channels in `_channels` that came from the source file. `_applyDefaultSetups`
+     * appends one channel per magnitude derivation after these, so the activation memory budget
+     * uses this to avoid counting a derivation both as a channel and as a cache slot.
+     */
+    protected _sourceChannelCount = 0
     protected _samplingRate: number | null = null
     protected _sensorGroups: AccSensorGroup[] = []
     protected _service: AccService | null = null
@@ -159,6 +165,7 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
                 ch,
             ))
         }
+        this._sourceChannelCount = this._channels.length
         // Raw-mode channel edits reach the plot through the resource, so relay them from here.
         this._relaySourceChannelChanges(this._channels)
         // ACC source channels render raw (no montage), so the
@@ -187,10 +194,17 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
             if (!this._service?.isReady && this._state === 'ready') {
                 this.dispatchEvent(BiosignalResourceEvents.SIGNAL_CACHING_COMPLETE, 'before')
                 if (this._memoryManager) {
-                    let totalMem = 4
+                    // Lock cell (1) + mutex meta fields (5: allocated, start, end,
+                    // data_unit_duration, window_epoch). Must track the meta-field set in
+                    // BiosignalMutex.
+                    let totalMem = 6
                     const dataFieldsLen = BiosignalMutex.SIGNAL_DATA_POS
-                    for (const chan of this.channels) {
-                        totalMem += chan.samplingRate * this._totalDuration + dataFieldsLen
+                    // Only the source channels: `_applyDefaultSetups` appends a channel per
+                    // derivation to `_channels`, and the slot loop below budgets those. Sizing is
+                    // in data time, which is what the worker allocates against — recording time
+                    // includes interruptions, which occupy no samples.
+                    for (const chan of this._channels.slice(0, this._sourceChannelCount)) {
+                        totalMem += chan.samplingRate*this._dataDuration + dataFieldsLen
                     }
                     for (const slot of this._derivationCacheSlots()) {
                         totalMem += slot.sampleCount + dataFieldsLen
@@ -275,6 +289,10 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
         }
         const created = await this.addMontage('rec', 'As recorded', this._setup, this._recMontageTemplate)
         if (created) {
+            // The as-recorded montage is what resolves a channel-scoped annotation back to the
+            // source channels it was drawn on. Left null, every such annotation resolves to an
+            // empty channel set and is skipped at render time while still present in `events`.
+            this._recordMontage = created
             await this.setActiveMontage('rec')
             Log.debug(`Activated default 'rec' montage.`, SCOPE)
         }
@@ -286,8 +304,17 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
      * resolved 3-axis groups produce one `SetupDerivation` each, and the
      * setup is attached to the resource so the activation-time materialisation
      * pipeline sees the derivations during memory sizing.
+     *
+     * Idempotent, as the base-class contract requires: `prepare` may run more than once over a
+     * recording's lifetime. A second pass would otherwise append a second channel per derivation
+     * and compute the new setup channels' indices past the end of the worker's cache slots, since
+     * the source count it measures would by then include the first pass's derived channels.
      */
     protected override async _applyDefaultSetups (): Promise<void> {
+        if (this._setup) {
+            Log.debug(`ACC setup already applied, skipping.`, SCOPE)
+            return
+        }
         const settings = this.#SETTINGS
         const setup = new GenericBiosignalSetup('acc')
         const setupChannels: SetupChannel[] = this._channels.map((ch, idx) => ({
@@ -384,7 +411,13 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
      */
     protected _buildRecMontageTemplate (
         groups: AccSensorGroup[],
-        derivByGroup: Map<string, { name: string, label: string, samplingRate?: number, laterality: BiosignalLaterality, unit: string }>,
+        derivByGroup: Map<string, {
+            name: string
+            label: string
+            samplingRate?: number
+            laterality: BiosignalLaterality
+            unit: string
+        }>,
     ): BiosignalMontageTemplate {
         const channels: BiosignalChannelTemplate[] = []
         const electrodes: string[] = []
@@ -579,9 +612,6 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
                 if (typeof entry.lowpass === 'number') {
                     await created.setLowpassFilter(entry.lowpass)
                 }
-                if (typeof entry.notch === 'number') {
-                    await created.setNotchFilter(entry.notch)
-                }
                 added.push(montageName)
                 Log.debug(
                     `Added cascade montage '${entry.label}' for source '${chosenSource}'.`,
@@ -599,8 +629,8 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
         template?: BiosignalMontageTemplate,
         config?: ConfigMapChannels,
     ): Promise<BiosignalMontage | null> {
-        let montage = this._montages.find(m => m.name === name) || null
-        if (this._mutexProps && this._service?.bufferRangeStart === undefined) {
+        const montage = this._montages.find(m => m.name === name) || null
+        if (this._mutexProps && this._service?.bufferRangeStart === INDEX_NOT_ASSIGNED) {
             Log.error(`Cannot add a montage before buffer has been initialized.`, SCOPE)
             return null
         }
@@ -771,7 +801,6 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
         ).then(response => {
             if (response) {
                 this.totalDuration = response
-                this.state = 'ready'
                 return true
             }
             this._errorReason = 'Setting up worker failed'
@@ -785,6 +814,21 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
         })
         if (ok) {
             await this._applyDefaultSetups()
+            // Flip to 'ready' only after the setups are attached. `state === 'ready'` is what makes
+            // the resource `isReady`, and the ACTIVATE handler budgets memory from
+            // `_setup.derivations` and builds montages from `_recMontageTemplate`; reaching it
+            // between the two leaves the SAB sized without a magnitude slot and the resource with
+            // no montages, with nothing to retrigger either.
+            this.state = 'ready'
+            // The loader starts prepare() without awaiting it and `setActiveResource` flips
+            // `isActive` without checking `isReady`, so a recording can be activated before it is
+            // prepared. The ACTIVATE handler's `state === 'ready'` guard is false at that point and
+            // nothing retries, so re-dispatch now that readiness is real. The handler's own guards
+            // make this a no-op once the service is set up.
+            if (this._isActive && !this._service?.isReady) {
+                Log.debug(`Recording activated before ready; running deferred setup.`, SCOPE)
+                this.dispatchEvent(AssetEvents.ACTIVATE, 'after')
+            }
         }
         return ok
     }
