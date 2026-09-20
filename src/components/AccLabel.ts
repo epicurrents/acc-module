@@ -14,14 +14,14 @@ export default class AccLabel extends ResourceLabel {
 
     public static fromTemplate (tpl: AnnotationLabelTemplate) {
         return new AccLabel(tpl.value, {
-            annotator: tpl.annotator || undefined,
-            class: tpl.class || undefined,
-            codes: tpl.codes || undefined,
-            label: tpl.label || undefined,
-            locked: tpl.locked || undefined,
-            priority: tpl.priority || undefined,
-            text: tpl.text || undefined,
-            visible: tpl.visible || undefined,
+            annotator: tpl.annotator ?? undefined,
+            class: tpl.class ?? undefined,
+            codes: tpl.codes ?? undefined,
+            label: tpl.label ?? undefined,
+            locked: tpl.locked ?? undefined,
+            priority: tpl.priority ?? undefined,
+            text: tpl.text ?? undefined,
+            visible: tpl.visible ?? undefined,
         })
     }
 
