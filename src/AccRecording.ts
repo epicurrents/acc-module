@@ -203,11 +203,14 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
                     // derivation to `_channels`, and the slot loop below budgets those. Sizing is
                     // in data time, which is what the worker allocates against — recording time
                     // includes interruptions, which occupy no samples.
+                    // The samples cover the whole data units the mutex lays out, not just the recording's own length.
+                    const coveredLength = BiosignalMutex.coveredLength(this._dataDuration)
                     for (const chan of this._channels.slice(0, this._sourceChannelCount)) {
-                        totalMem += chan.samplingRate*this._dataDuration + dataFieldsLen
+                        totalMem += Math.ceil(chan.samplingRate*coveredLength) + dataFieldsLen
                     }
                     for (const slot of this._derivationCacheSlots()) {
-                        totalMem += slot.sampleCount + dataFieldsLen
+                        totalMem += Math.max(slot.sampleCount, Math.ceil(slot.samplingRate*coveredLength))
+                                    + dataFieldsLen
                     }
                     const memorySuccess = await this._service?.requestMemory(totalMem)
                     if (!memorySuccess) {
