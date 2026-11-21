@@ -171,15 +171,25 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
             if (!this._source && !this.isListed) {
                 return
             }
-            // Activation loads a recording that has not loaded yet, and the cache is commissioned only once that load
-            // has succeeded, on a recording still active by then. The listener slot is synchronous, so the setup's
-            // failure has to be caught here or it surfaces as an unhandled rejection.
+            // The listener slot is synchronous, so the setup's failure has to be caught here or it surfaces as an
+            // unhandled rejection.
+            const completeSetup = () => this._completeSetup().catch((e: unknown) => {
+                Log.error(`Completing setup of the ACC recording failed.`, SCOPE, e as Error)
+            })
+            // A loaded recording commissions its cache within this dispatch. The plot asks for signals as soon as it
+            // sees the recording active, and a setup deferred past the dispatch reaches the worker after that request.
+            if (this._state === 'ready') {
+                completeSetup()
+                return
+            }
+            // A recording that has not loaded is loaded first, and its cache is commissioned only once that load has
+            // succeeded, on a recording still active by then.
             this.load().then(async loaded => {
                 if (loaded && this._isActive) {
-                    await this._completeSetup()
+                    await completeSetup()
                 }
             }).catch((e: unknown) => {
-                Log.error(`Completing setup of the ACC recording failed.`, SCOPE, e as Error)
+                Log.error(`Loading the ACC recording on activation failed.`, SCOPE, e as Error)
             })
         }, this.id)
         if (source && AccRecording.isCompleteStudy(source)) {

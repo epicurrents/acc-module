@@ -21,7 +21,7 @@ The derived signal carries the same display unit as the axes it was computed fro
 Loading
 -------
 
-A recording is built unloaded, by `AccStudyLoader` from a study the CSV importer has read or by `createListedResource` from a listing, and it starts no worker. Loading reads the channels and the header from the study (fetching it first for a listed recording), creates the service, sets up the reader worker and attaches the default setup; the recording is `ready` only once the worker has answered. Activation loads a recording that has not loaded, and only then allocates the signal cache, builds the `rec` montage and fills the cache. A failure leaves `error` and a reason on the same object.
+A recording is built unloaded, by `AccStudyLoader` from a study the CSV importer has read or by `createListedResource` from a listing, and it starts no worker. Loading reads the channels and the header from the study (fetching it first for a listed recording), creates the service, sets up the reader worker and attaches the default setup; the recording is `ready` only once the worker has answered. Activation loads a recording that has not loaded, and only then allocates the signal cache, builds the `rec` montage and fills the cache; a recording already loaded starts that within the activation, ahead of any signal request the activation provokes. A failure leaves `error` and a reason on the same object.
 
 Channel naming
 --------------

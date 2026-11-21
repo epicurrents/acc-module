@@ -119,6 +119,18 @@ describe('a listed ACC study', () => {
         expect(importer.getFileTypeWorker).toHaveBeenCalledWith('acc')
     })
 
+    it('commissions the cache of a loaded recording within the activation itself', async () => {
+        const complete = vi.spyOn(AccRecording.prototype as unknown as { _completeSetup: () => Promise<void> },
+                                  '_completeSetup')
+            .mockResolvedValue(undefined)
+        const listed = app.listStudy({ loader: 'acc/url', name: 'Listed', source: 'blob:acc' }, { dataset })!
+        expect(await listed.load()).toBe(true)
+        // No await: the plot requests signals as soon as the recording is active, and the setup has to reach the
+        // worker before that request does.
+        app.runtime.setActiveResource(listed)
+        expect(complete).toHaveBeenCalledTimes(1)
+    })
+
     it('fails on the listed object when the study it reads is incomplete', async () => {
         importer.importUrl.mockImplementationOnce(async () => {
             importer.study!.meta = { channels: CHANNELS }
