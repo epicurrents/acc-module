@@ -1,25 +1,24 @@
 /**
  * Epicurrents ACC study loader.
  *
- * Pulls the parsed channel descriptors and {@link BiosignalHeaderRecord} the
- * CSV importer wrote into `study.meta` and hands them to `AccRecording` along
- * with the file worker and the registered memory manager. The resource's own
- * `prepare()` then runs the worker round-trip and applies the default ACC
- * setup before activation.
+ * Builds an `AccRecording`, unloaded, from a study whose `meta` carries the
+ * channel descriptors and {@link BiosignalHeaderRecord} the CSV importer wrote,
+ * or from a listing that reads such a study later. The recording's own load
+ * asks for the file worker, runs the worker round trip and applies the
+ * default ACC setup before activation.
  *
  * @package    epicurrents/acc-module
  * @copyright  2026 Sampsa Lohi
  * @license    Apache-2.0
  */
 
-import { BiosignalStudyLoader, GenericBiosignalHeader } from '@epicurrents/core'
+import { BiosignalStudyLoader } from '@epicurrents/core'
 import type {
-    BiosignalChannel,
     ConfigStudyLoader,
     FileFormatImporter,
     FileSystemItem,
-    SafeObject,
     StudyContext,
+    StudyListing,
 } from '@epicurrents/core/types'
 import AccRecording from '../AccRecording'
 import type { AccResource } from '#types'
@@ -35,46 +34,6 @@ export default class AccStudyLoader extends BiosignalStudyLoader {
 
     get resourceModality () {
         return 'acc'
-    }
-
-    async getResource (idx: number | string = -1): Promise<AccResource | null> {
-        const loaded = await super.getResource(idx)
-        if (loaded) {
-            return loaded as AccResource
-        } else if (!this._study) {
-            return null
-        }
-        const meta = this._study.meta as {
-            channels?: BiosignalChannel[]
-            formatHeader?: SafeObject
-            header?: GenericBiosignalHeader
-        }
-        if (!this._study.name || !meta?.channels || !meta.header) {
-            Log.error(
-                `Cannot construct an ACC resource from given study context; ` +
-                `it is missing required properties (channels / header).`,
-                SCOPE,
-            )
-            return null
-        }
-        const worker = this._studyImporter?.getFileTypeWorker('acc')
-        if (!worker) {
-            Log.error(`Study loader does not have a file worker.`, SCOPE)
-            return null
-        }
-        const acc = new AccRecording(
-            this._study.name,
-            meta.channels,
-            meta.header,
-            worker,
-            this._memoryManager || undefined,
-            { formatHeader: meta.formatHeader },
-        )
-        acc.source = this._study
-        acc.state = 'loaded'
-        this._resources.push(acc)
-        this._study = null
-        return acc
     }
 
     /**
@@ -94,6 +53,52 @@ export default class AccStudyLoader extends BiosignalStudyLoader {
             }
         }
         return study
+    }
+
+    /**
+     * The importer's ACC worker. A recording asks for it when it loads, not when it is created.
+     */
+    protected _getFileWorker () {
+        return this._studyImporter?.getFileTypeWorker('acc') ?? null
+    }
+
+    createListedResource (listing: StudyListing) {
+        // Kept out of `_resources`: that list is what a read study's resource is found in by index, and a listing
+        // entered between a read and its `getResource` would take the read study's place.
+        return new AccRecording(
+            listing.name,
+            undefined,
+            () => this._getFileWorker(),
+            this._memoryManager || undefined,
+        )
+    }
+
+    async getResource (idx: number | string = -1): Promise<AccResource | null> {
+        const loaded = await super.getResource(idx)
+        if (loaded) {
+            return loaded as AccResource
+        } else if (!this._study) {
+            return null
+        }
+        if (!AccRecording.isCompleteStudy(this._study)) {
+            Log.error(
+                `Cannot construct an ACC resource from given study context; ` +
+                `it is missing required properties (channels / header).`,
+                SCOPE,
+            )
+            return null
+        }
+        // Built unloaded, as a listed recording is: the loader that opened the study loads it straight after.
+        const acc = new AccRecording(
+            this._study.name,
+            this._study,
+            () => this._getFileWorker(),
+            this._memoryManager || undefined,
+        )
+        acc.state = 'loaded'
+        this._resources.push(acc)
+        this._study = null
+        return acc
     }
 
     async loadFromDirectory (dir: FileSystemItem, config?: ConfigStudyLoader): Promise<StudyContext | null> {

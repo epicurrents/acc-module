@@ -26,7 +26,7 @@ Magnitude is the reason this module exists. It is **declared** here and **comput
 
 1. `parseSensorGroups` (in [src/util.ts](src/util.ts)) parses source-channel labels into sensor groups via the configured `channelNamePattern`.
 2. `magnitudeDerivationsForGroups` projects each resolved group into a `SetupDerivation` carrying `operation: 'magnitude'` and `active: [xIdx, yIdx, zIdx]`.
-3. `AccRecording._applyDefaultSetups()` puts those on the setup during `prepare()`.
+3. `AccRecording._applyDefaultSetups()` puts those on the setup when the recording loads, before it reports `ready`, so the activation-time budget sizes a slot for each.
 4. Core takes it from there: `GenericBiosignalResource._derivationCacheSlots` sizes one cache slot per derivation, and `GenericSignalReader._materialiseDerivation` computes `sqrt(Σᵢ (activeᵢ × weightᵢ)²)` during cache fill.
 
 Because the arithmetic lives in core, a change to the emitted shape is a cross-package change. `BiosignalDerivationOperation` in core's `types/biosignal.ts` is the authority on which operations exist; adding one means extending that union and its dispatch in core first.
@@ -65,6 +65,8 @@ The asymmetry means **a new top-level directory under `src/` type-checks and fai
 **Test the exported code, not a copy of it.** The module's classes import cleanly under jsdom, and a method that reads only a few members of `this` can be exercised through `Prototype.method.call(stub, …)` without booting the activation lifecycle — [tests/cascade.test.ts](tests/cascade.test.ts) does this for `addCascadeMontagesFromEntries`. A test that re-implements the logic it is checking passes regardless of what the production code does, which is worse than no test: it reports coverage of a method it cannot fail on.
 
 The corollary for review: when a test file declares a local helper that mirrors a production function, check whether the assertions reach the real one.
+
+The exception is the listing path, which lives between this package and core: [tests/listed.test.ts](tests/listed.test.ts) drives the real loader through the real `listStudy` and activation, with only the importer as a double, shaped like the CSV importer.
 
 ## Code comment conventions
 

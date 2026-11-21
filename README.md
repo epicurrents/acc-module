@@ -8,7 +8,7 @@ The module is signal-source-agnostic. Loaders typically use the `csv-reader` pac
 Magnitude flow
 --------------
 
-`AccRecording._applyDefaultSetups()` runs during `prepare()` (lifecycle hook from `GenericBiosignalResource` in `@epicurrents/core`):
+`AccRecording._applyDefaultSetups()` runs when the recording loads (lifecycle hook from `GenericBiosignalResource` in `@epicurrents/core`):
 
 1. Parse channel labels into sensor groups via the configured `channelNamePattern` (default `<group>_<axis>`, e.g. `wrist_x`, `wrist_y`, `wrist_z`).
 2. For each resolved 3-axis group, emit a `SetupDerivation` with `operation: 'magnitude'`, `active: [xIdx, yIdx, zIdx]`, `reference: []`.
@@ -17,6 +17,11 @@ Magnitude flow
 A group produces a magnitude only when all three axes resolved and agree on a sampling rate. Magnitude is undefined for incomplete sensor data, and silently substituting zero would mislead; axes at different rates are the same problem less visibly, since the materialisation reads every axis at the same sample index and would combine samples from different instants.
 
 The derived signal carries the same display unit as the axes it was computed from. The materialisation is a plain root-sum-of-squares and converts nothing, so a differing unit would only put the derived row on a different scale from its own inputs. Samples themselves are normalised to SI on decode, as for every other modality.
+
+Loading
+-------
+
+A recording is built unloaded, by `AccStudyLoader` from a study the CSV importer has read or by `createListedResource` from a listing, and it starts no worker. Loading reads the channels and the header from the study (fetching it first for a listed recording), creates the service, sets up the reader worker and attaches the default setup; the recording is `ready` only once the worker has answered. Activation loads a recording that has not loaded, and only then allocates the signal cache, builds the `rec` montage and fills the cache. A failure leaves `error` and a reason on the same object.
 
 Channel naming
 --------------
@@ -73,7 +78,7 @@ Public surface
 
 - `AccRecording` — extends `GenericBiosignalResource`, modality `'acc'`.
 - `AccService` — extends `GenericBiosignalService`.
-- `AccStudyLoader` — extends `GenericStudyLoader`.
+- `AccStudyLoader` — extends `BiosignalStudyLoader`.
 - `AccSourceChannel`, `AccMontageChannel`, `AccCascadeMontage`, `AccEvent`, `AccLabel`.
 - `parseSensorGroups(channels, options?)` — pure helper, also useful for non-resource tooling.
 - `magnitudeDerivationsForGroups(groups)` — project resolved 3-axis groups into `SetupDerivation[]`.

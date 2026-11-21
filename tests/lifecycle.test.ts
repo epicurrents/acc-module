@@ -1,5 +1,5 @@
 /**
- * Tests for `AccRecording`'s preparation and montage lifecycle.
+ * Tests for `AccRecording`'s load and montage lifecycle.
  *
  * Both methods are exercised through `AccRecording.prototype` against a stub carrying only the
  * members they read. What is being pinned is ordering and assignment rather than signal maths, so
@@ -11,13 +11,12 @@
  */
 
 import AccRecording from '../src/AccRecording'
-import { AssetEvents } from '@epicurrents/core/events'
 
 vi.mock('scoped-event-log', () => ({
     Log: { debug: vi.fn(), error: vi.fn(), warn: vi.fn(), info: vi.fn() },
 }))
 
-const callPrototype = (method: 'prepare' | '_applyDefaultMontages', context: object, ...args: unknown[]) =>
+const callPrototype = (method: '_load' | '_applyDefaultMontages', context: object, ...args: unknown[]) =>
     (AccRecording.prototype as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>)
         [method].call(context, ...args)
 
@@ -62,85 +61,93 @@ describe('_applyDefaultMontages', () => {
     })
 })
 
-describe('prepare', () => {
+describe('_load', () => {
     beforeEach(() => { vi.clearAllMocks() })
 
     /**
-     * Records the order in which readiness is advertised and setups are attached, so the test can
+     * Records the order in which the worker is set up and the setups are attached, so the test can
      * assert on their sequence rather than only their occurrence.
      */
-    const makeContext = (options: { setupWorkerResponse?: number, isActive?: boolean } = {}) => {
+    const makeContext = (options: { setupWorkerResponse?: number, worker?: object | null } = {}) => {
         const order: string[] = []
+        const service = {
+            isReady: false,
+            setupWorker: vi.fn(() => {
+                order.push('worker')
+                return Promise.resolve(options.setupWorkerResponse ?? 120)
+            }),
+        }
         const context = {
+            name: 'acc',
             _headers: {},
-            _source: {},
+            _source: { name: 'acc', files: [], meta: { channels: [], header: {} } } as object | null,
             _formatHeader: null,
             _errorReason: '',
-            _isActive: options.isActive ?? false,
+            _getWorker: vi.fn(() => (options.worker === undefined ? {} : options.worker)),
+            _memoryManager: null,
+            _readSource: vi.fn(),
+            _service: service as typeof service | null,
             _state: 'loading',
-            _service: {
-                isReady: false,
-                setupWorker: vi.fn().mockResolvedValue(options.setupWorkerResponse ?? 120),
-            },
             totalDuration: 0,
-            get state () { return this._state },
-            set state (value: string) {
-                this._state = value
-                order.push(`state:${value}`)
-            },
             _applyDefaultSetups: vi.fn(() => {
                 order.push('setups')
                 return Promise.resolve()
             }),
-            dispatchEvent: vi.fn((event: string, phase: string) => {
-                order.push(`dispatch:${event}:${phase}`)
-            }),
         }
-        return { context, order }
+        return { context, order, service }
     }
 
-    it('attaches the setups before advertising readiness', async () => {
+    it('attaches the setups once the worker has answered, before the load resolves', async () => {
         const { context, order } = makeContext()
-        await callPrototype('prepare', context, {})
-        // A consumer that sees `state === 'ready'` must be able to trust that `_setup` is populated:
-        // the activation handler budgets SAB memory from its derivations and builds montages from
-        // the template, and reaching it in between leaves both silently empty.
-        expect(order.indexOf('setups')).toBeLessThan(order.indexOf('state:ready'))
+        await expect(callPrototype('_load', context, {})).resolves.toBe(true)
+        // The load resolving is what makes the resource ready, and a consumer that sees `ready` must be
+        // able to trust that `_setup` is populated: activation budgets SAB memory from its derivations
+        // and builds montages from the template, and reaching it before leaves both silently empty.
+        expect(order).toEqual(['worker', 'setups'])
+        // Readiness is the lifecycle's to set, once the load has resolved.
+        expect(context._state).toBe('loading')
     })
 
-    it('reports success and records the duration the worker returned', async () => {
+    it('records the duration the worker returned', async () => {
         const { context } = makeContext({ setupWorkerResponse: 300 })
-        await expect(callPrototype('prepare', context, {})).resolves.toBe(true)
+        await callPrototype('_load', context, {})
         expect(context.totalDuration).toBe(300)
-        expect(context._state).toBe('ready')
     })
 
-    it('re-dispatches ACTIVATE when the resource was activated before it was ready', async () => {
-        const { context, order } = makeContext({ isActive: true })
-        await callPrototype('prepare', context, {})
-        expect(context.dispatchEvent).toHaveBeenCalledWith(AssetEvents.ACTIVATE, 'after')
-        // Only once readiness is real, or the handler's own guard turns it away again.
-        expect(order.indexOf('state:ready'))
-            .toBeLessThan(order.indexOf(`dispatch:${AssetEvents.ACTIVATE}:after`))
-    })
-
-    it('does not re-dispatch ACTIVATE for a resource that was never activated', async () => {
-        const { context } = makeContext({ isActive: false })
-        await callPrototype('prepare', context, {})
-        expect(context.dispatchEvent).not.toHaveBeenCalled()
-    })
-
-    it('does not re-dispatch ACTIVATE when the service is already set up', async () => {
-        const { context } = makeContext({ isActive: true })
-        context._service.isReady = true
-        await callPrototype('prepare', context, {})
-        expect(context.dispatchEvent).not.toHaveBeenCalled()
-    })
-
-    it('errors without attaching setups when the worker reports failure', async () => {
+    it('fails with a reason, without attaching setups, when the worker reports failure', async () => {
         const { context, order } = makeContext({ setupWorkerResponse: 0 })
-        await expect(callPrototype('prepare', context, {})).resolves.toBe(false)
-        expect(context._state).toBe('error')
+        await expect(callPrototype('_load', context, {})).resolves.toBe(false)
+        expect(context._errorReason).toBe('Setting up worker failed')
         expect(order).not.toContain('setups')
+    })
+
+    it('fails with a reason when setting up the worker throws', async () => {
+        const { context, service } = makeContext()
+        service.setupWorker.mockRejectedValueOnce(new Error('no file'))
+        await expect(callPrototype('_load', context, {})).resolves.toBe(false)
+        expect(context._errorReason).toBe('Setting up worker failed')
+    })
+
+    it('creates the service from the worker it asks for when it has none', async () => {
+        const { context } = makeContext({ worker: null })
+        context._service = null
+        await expect(callPrototype('_load', context, {})).resolves.toBe(false)
+        expect(context._getWorker).toHaveBeenCalledTimes(1)
+        expect(context._errorReason).toBe('No file worker')
+    })
+
+    it('reads the study of a listed recording before it sets up the worker', async () => {
+        const { context } = makeContext()
+        context._headers = null as unknown as object
+        await callPrototype('_load', context, {})
+        expect(context._readSource).toHaveBeenCalledWith(context._source)
+    })
+
+    it('fails with a reason when the study lacks its channels or header', async () => {
+        const { context, service } = makeContext()
+        context._source = { name: 'acc', files: [], meta: { channels: [] } }
+        await expect(callPrototype('_load', context, {})).resolves.toBe(false)
+        expect(context._errorReason).toBe('Recording study is incomplete')
+        expect(service.setupWorker).not.toHaveBeenCalled()
     })
 })

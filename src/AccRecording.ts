@@ -3,7 +3,7 @@
  *
  * Thin wrapper around `GenericBiosignalResource`. Source-channel construction
  * is driven by the parsed `BiosignalChannel[]` and `BiosignalHeaderRecord` the
- * CSV importer hands over via `study.meta`; `prepare()` then awaits the
+ * CSV importer hands over via `study.meta`; the load then awaits the
  * worker's parse-and-acknowledge round trip before calling
  * {@link AccRecording._applyDefaultSetups}, which declares one
  * `SetupDerivation` per resolved three-axis sensor group. Core's
@@ -38,11 +38,11 @@ import type {
     BiosignalSetup,
     ConfigBiosignalMontage,
     ConfigMapChannels,
+    ConfigStudyLoader,
     MemoryManager,
     SetupChannel,
     SpectralToneSynthesisOptions,
     StudyContext,
-    UrlAccessOptions,
 } from '@epicurrents/core/types'
 import { Log } from 'scoped-event-log'
 import AccCascadeMontage from '#components/AccCascadeMontage'
@@ -93,6 +93,14 @@ function prettyGroupPrefix (groupId: string): string {
 export default class AccRecording extends GenericBiosignalResource implements AccResource {
     /** ACC recording events (not including property change events). */
     static readonly EVENTS = { ...GenericBiosignalResource.EVENTS, ...AccEvents }
+    /**
+     * Whether `study` carries what a recording is built from: a name, and the channels and the header in `meta`.
+     * @param study - The study context to check.
+     */
+    static isCompleteStudy (study: StudyContext) {
+        const meta = study.meta as { channels?: unknown, header?: unknown } | undefined
+        return !!study.name && Array.isArray(meta?.channels) && !!meta?.header
+    }
 
     /** Player for the synthesised entrainment audio. */
     protected _audio: BiosignalAudio
@@ -102,7 +110,10 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
     protected _audioWindowStart = 0
     /** Format-specific header (e.g. the EDF header) the reader worker needs at setup; null for CSV. */
     protected _formatHeader: object | null = null
-    protected _headers: BiosignalHeaderRecord
+    /** Gives the worker the service runs on, asked for only when the recording loads. */
+    protected _getWorker: (() => Worker | null) | null
+    /** Header of the recording's file, read from the study; null until the study has been read. */
+    protected _headers: BiosignalHeaderRecord | null = null
     protected _isAudioPlaying = false
     protected _recMontageTemplate: BiosignalMontageTemplate | null = null
     /**
@@ -118,40 +129,217 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
     #SETTINGS = (window.__EPICURRENTS__?.RUNTIME?.SETTINGS.modules.acc as AccModuleSettings) || null
 
     /**
-     * Construct the ACC recording from the importer's parsed CSV stream. The
-     * `channels` descriptors are wrapped in `AccSourceChannel` and their
-     * baseline offsets are distributed evenly straight away — ACC defaults to
-     * raw display (no montage) where the `GenericBiosignalMontage` path that
-     * normally distributes baseline offsets never runs. The service captures
-     * `fileWorker` for the rest of the resource's lifetime; the activation
-     * handler installed here wires SAB or fallback-cache setup, default-montage
-     * activation, and the cache-fill kickoff together.
+     * Create an ACC recording. It starts no worker: the service is created and set up when the recording loads, and
+     * the signal cache is commissioned when it is first activated after that. Given a study, the channels are built
+     * from it straight away, with their baseline offsets distributed evenly — ACC defaults to raw display (no
+     * montage), where the `GenericBiosignalMontage` path that normally distributes them never runs.
      * @param name - Human-readable resource name; surfaced in the dataset navigator.
-     * @param channels - Per-column descriptors the CSV importer wrote into `study.meta.channels`.
-     * @param header - Parsed biosignal header carrying duration, sampling rate, and the per-channel layout.
-     * @param fileWorker - Worker that runs the CSV reader off the main thread.
-     * @param memoryManager - Optional SAB manager; when present and `useMemoryManager` is on, signals
-     *                       cache into a shared buffer instead of the main-thread fallback cache.
+     * @param source - Recording source as a study context carrying the channels and the header in `meta`, as the CSV importer writes them; absent for a listed recording until its study is read.
+     * @param getWorker - Gives the worker that runs the CSV reader off the main thread when the recording loads; without one the load fails.
+     * @param memoryManager - Optional SAB manager; when present and `useMemoryManager` is on, signals cache into a shared buffer instead of the main-thread fallback cache.
      * @param config - Optional resource overrides (`modality`, `formatHeader`); empty by default.
      */
     constructor (
         name: string,
-        channels: BiosignalChannel[],
-        header: BiosignalHeaderRecord,
-        fileWorker: Worker,
+        source?: StudyContext,
+        getWorker?: () => Worker | null,
         memoryManager?: MemoryManager,
         config: BiosignalConfig = {} as BiosignalConfig,
     ) {
-        super(name, config?.modality || 'acc')
+        super(name, config?.modality || 'acc', source)
         if (!this.#SETTINGS) {
             Log.error(`ACC settings not found in the global Epicurrents runtime.`, SCOPE)
         }
-        this._headers = header
+        this._getWorker = getWorker ?? null
         if (config.formatHeader) {
             this._formatHeader = config.formatHeader
         }
         if (memoryManager && this.#SETTINGS?.useMemoryManager) {
             this.setMemoryManager(memoryManager)
+        }
+        this._audio = new BiosignalAudio(name)
+        this._audio.addPlayEndedCallback(() => this._onAudioEnded())
+        this.addEventListener(AssetEvents.DEACTIVATE, async () => {
+            if (this.#SETTINGS?.unloadOnClose && this._service?.isReady) {
+                await this.unload()
+            }
+        }, this.id)
+        this.addEventListener(AssetEvents.ACTIVATE, () => {
+            if (!this._isActive) {
+                return
+            }
+            if (!this._source && !this.isListed) {
+                return
+            }
+            // Activation loads a recording that has not loaded yet, and the cache is commissioned only once that load
+            // has succeeded, on a recording still active by then. The listener slot is synchronous, so the setup's
+            // failure has to be caught here or it surfaces as an unhandled rejection.
+            this.load().then(async loaded => {
+                if (loaded && this._isActive) {
+                    await this._completeSetup()
+                }
+            }).catch((e: unknown) => {
+                Log.error(`Completing setup of the ACC recording failed.`, SCOPE, e as Error)
+            })
+        }, this.id)
+        if (source && AccRecording.isCompleteStudy(source)) {
+            this._readSource(source)
+        }
+    }
+
+    get isAudioPlaying (): boolean {
+        return this._isAudioPlaying
+    }
+    set isAudioPlaying (playing: boolean) {
+        this._setPropertyValue('isAudioPlaying', playing)
+    }
+
+    get playbackPosition (): number {
+        return this._audioWindowStart + this._audio.currentTime
+    }
+
+    get sensorGroups (): AccSensorGroup[] {
+        return this._sensorGroups
+    }
+
+    /**
+     * Commission the signal cache of a loaded recording, build its default montage and fill the cache: allocate the
+     * shared buffer (or the JS-heap cache), add the `rec` montage, and cache the signals. Idempotent: a ready service
+     * means the work is already done, and a recording that has not loaded is not yet set up to receive it.
+     */
+    protected async _completeSetup (): Promise<void> {
+        if (!this._service?.isReady && this._state === 'ready') {
+            this.dispatchEvent(BiosignalResourceEvents.SIGNAL_CACHING_COMPLETE, 'before')
+            if (this._memoryManager) {
+                // Lock cell (1) + mutex meta fields (5: allocated, start, end,
+                // data_unit_duration, window_epoch). Must track the meta-field set in
+                // BiosignalMutex.
+                let totalMem = 6
+                const dataFieldsLen = BiosignalMutex.SIGNAL_DATA_POS
+                // Only the source channels: `_applyDefaultSetups` appends a channel per
+                // derivation to `_channels`, and the slot loop below budgets those. Sizing is
+                // in data time, which is what the worker allocates against — recording time
+                // includes interruptions, which occupy no samples.
+                // The samples cover the whole data units the mutex lays out, not just the recording's own length.
+                const coveredLength = BiosignalMutex.coveredLength(this._dataDuration)
+                for (const chan of this._channels.slice(0, this._sourceChannelCount)) {
+                    totalMem += Math.ceil(chan.samplingRate*coveredLength) + dataFieldsLen
+                }
+                for (const slot of this._derivationCacheSlots()) {
+                    totalMem += Math.max(slot.sampleCount, Math.ceil(slot.samplingRate*coveredLength))
+                                + dataFieldsLen
+                }
+                const memorySuccess = await this._service?.requestMemory(totalMem)
+                if (!memorySuccess) {
+                    Log.error(`Memory allocation failed.`, SCOPE)
+                    this.state = 'error'
+                    this.errorReason = 'Memory allocation failed'
+                    this.isActive = false
+                    return
+                }
+                Log.debug(`Memory allocation complete.`, SCOPE)
+                const mutex = await this.setupMutex()
+                if (!mutex) {
+                    Log.error(`Mutex setup failed.`, SCOPE)
+                    this.state = 'error'
+                    this.errorReason = 'Mutex setup failed'
+                    this.isActive = false
+                    return
+                }
+                Log.debug(`Buffer setup complete.`, SCOPE)
+            } else {
+                const dataCache = await this.setupCache()
+                if (!dataCache) {
+                    Log.error(`Data cache setup failed.`, SCOPE)
+                    this.state = 'error'
+                    this.errorReason = 'Data cache setup failed'
+                    this.isActive = false
+                    return
+                }
+                Log.debug(`Data cache setup complete.`, SCOPE)
+            }
+            // Default montage ('rec') needs the mutex/cache in place;
+            // adding it before `cacheSignals` ensures it's the active
+            // montage by the time signals start arriving.
+            await this._applyDefaultMontages()
+            Log.debug(`ACC recording initial setup complete.`, SCOPE)
+            const cacheOk = await this.cacheSignals()
+            if (cacheOk === false) {
+                Log.error(
+                    `Signal caching failed for ${this.name}.`,
+                    SCOPE,
+                    new Error(`Signal caching failed for ${this.name}.`),
+                    {
+                        announce:
+                            `Could not load "${this.name}" — the recording may be ` +
+                            `too large for the configured memory budget.`,
+                    },
+                )
+                this._errorReason = this._errorReason || 'Signal caching failed'
+                this.state = 'error'
+            }
+            this.dispatchEvent(BiosignalResourceEvents.SIGNAL_CACHING_COMPLETE)
+        }
+    }
+
+    /**
+     * Read the channels and the header from the study, create the service and set up its worker, and attach the
+     * default setup. The setup is attached before the load resolves, so a recording that is ready has it: activation
+     * budgets the buffer from its derivations and builds the montage from the template it records.
+     * @param options - Options to load with; passed to the worker, which reads the file with them.
+     */
+    protected async _load (options?: ConfigStudyLoader) {
+        const source = this._source
+        if (!source || !AccRecording.isCompleteStudy(source)) {
+            Log.error(`Cannot load the ACC recording ${this.name}; its study is missing required properties.`, SCOPE)
+            this._errorReason = 'Recording study is incomplete'
+            return false
+        }
+        if (!this._headers) {
+            this._readSource(source)
+        }
+        if (!this._service) {
+            const worker = this._getWorker?.() ?? null
+            if (!worker) {
+                Log.error(`Cannot load the ACC recording ${this.name}; there is no file worker for it.`, SCOPE)
+                this._errorReason = 'No file worker'
+                return false
+            }
+            this._service = new AccService(this, worker, this._memoryManager || undefined)
+        }
+        const duration = await this._service.setupWorker(
+            this._headers as BiosignalHeaderRecord,
+            source,
+            options,
+            this._formatHeader || undefined,
+        ).catch((e: unknown) => {
+            Log.error(`Error when preparing the worker for the ACC recording.`, SCOPE, e as Error)
+            return 0
+        })
+        if (!duration) {
+            this._errorReason = 'Setting up worker failed'
+            return false
+        }
+        this.totalDuration = duration
+        await this._applyDefaultSetups()
+        return true
+    }
+
+    /**
+     * Build the source channels and take the header, the format header and the durations from the study's `meta`.
+     * @param source - A study that passes {@link AccRecording.isCompleteStudy}.
+     */
+    protected _readSource (source: StudyContext) {
+        const meta = source.meta as {
+            channels: BiosignalChannel[]
+            formatHeader?: object
+            header: BiosignalHeaderRecord
+        }
+        const channels = meta.channels
+        const header = meta.header
+        this._headers = header
+        if (!this._formatHeader && meta.formatHeader) {
+            this._formatHeader = meta.formatHeader
         }
         for (let i = 0; i < channels.length; i++) {
             const ch = channels[i]
@@ -173,112 +361,10 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
         // offsets never runs. Place each source channel at an equal vertical
         // slot now.
         calculateSignalOffsets(this._channels)
-        // Service owns the worker for the rest of the resource's lifetime.
-        this._service = new AccService(this, fileWorker, this._memoryManager || undefined)
-        this._audio = new BiosignalAudio(name)
-        this._audio.addPlayEndedCallback(() => this._onAudioEnded())
         this._samplingRate = header.maxSamplingRate || channels[0]?.samplingRate || 0
         this._dataDuration = header.dataDuration || 0
         this._totalDuration = header.totalDuration || this._dataDuration
         this._startTime = header.recordingStartTime ?? null
-        this._state = 'loading'
-        this.addEventListener(AssetEvents.DEACTIVATE, async () => {
-            if (this.#SETTINGS?.unloadOnClose && this._service?.isReady) {
-                await this.unload()
-            }
-        }, this.id)
-        this.addEventListener(AssetEvents.ACTIVATE, async () => {
-            if (!this._isActive) {
-                return
-            }
-            if (!this._service?.isReady && this._state === 'ready') {
-                this.dispatchEvent(BiosignalResourceEvents.SIGNAL_CACHING_COMPLETE, 'before')
-                if (this._memoryManager) {
-                    // Lock cell (1) + mutex meta fields (5: allocated, start, end,
-                    // data_unit_duration, window_epoch). Must track the meta-field set in
-                    // BiosignalMutex.
-                    let totalMem = 6
-                    const dataFieldsLen = BiosignalMutex.SIGNAL_DATA_POS
-                    // Only the source channels: `_applyDefaultSetups` appends a channel per
-                    // derivation to `_channels`, and the slot loop below budgets those. Sizing is
-                    // in data time, which is what the worker allocates against — recording time
-                    // includes interruptions, which occupy no samples.
-                    // The samples cover the whole data units the mutex lays out, not just the recording's own length.
-                    const coveredLength = BiosignalMutex.coveredLength(this._dataDuration)
-                    for (const chan of this._channels.slice(0, this._sourceChannelCount)) {
-                        totalMem += Math.ceil(chan.samplingRate*coveredLength) + dataFieldsLen
-                    }
-                    for (const slot of this._derivationCacheSlots()) {
-                        totalMem += Math.max(slot.sampleCount, Math.ceil(slot.samplingRate*coveredLength))
-                                    + dataFieldsLen
-                    }
-                    const memorySuccess = await this._service?.requestMemory(totalMem)
-                    if (!memorySuccess) {
-                        Log.error(`Memory allocation failed.`, SCOPE)
-                        this.state = 'error'
-                        this.errorReason = 'Memory allocation failed'
-                        this.isActive = false
-                        return
-                    }
-                    Log.debug(`Memory allocation complete.`, SCOPE)
-                    const mutex = await this.setupMutex()
-                    if (!mutex) {
-                        Log.error(`Mutex setup failed.`, SCOPE)
-                        this.state = 'error'
-                        this.errorReason = 'Mutex setup failed'
-                        this.isActive = false
-                        return
-                    }
-                    Log.debug(`Buffer setup complete.`, SCOPE)
-                } else {
-                    const dataCache = await this.setupCache()
-                    if (!dataCache) {
-                        Log.error(`Data cache setup failed.`, SCOPE)
-                        this.state = 'error'
-                        this.errorReason = 'Data cache setup failed'
-                        this.isActive = false
-                        return
-                    }
-                    Log.debug(`Data cache setup complete.`, SCOPE)
-                }
-                // Default montage ('rec') needs the mutex/cache in place;
-                // adding it before `cacheSignals` ensures it's the active
-                // montage by the time signals start arriving.
-                await this._applyDefaultMontages()
-                Log.debug(`ACC recording initial setup complete.`, SCOPE)
-                const cacheOk = await this.cacheSignals()
-                if (cacheOk === false) {
-                    Log.error(
-                        `Signal caching failed for ${this.name}.`,
-                        SCOPE,
-                        new Error(`Signal caching failed for ${this.name}.`),
-                        {
-                            announce:
-                                `Could not load "${this.name}" — the recording may be ` +
-                                `too large for the configured memory budget.`,
-                        },
-                    )
-                    this._errorReason = this._errorReason || 'Signal caching failed'
-                    this.state = 'error'
-                }
-                this.dispatchEvent(BiosignalResourceEvents.SIGNAL_CACHING_COMPLETE)
-            }
-        }, this.id)
-    }
-
-    get isAudioPlaying (): boolean {
-        return this._isAudioPlaying
-    }
-    set isAudioPlaying (playing: boolean) {
-        this._setPropertyValue('isAudioPlaying', playing)
-    }
-
-    get playbackPosition (): number {
-        return this._audioWindowStart + this._audio.currentTime
-    }
-
-    get sensorGroups (): AccSensorGroup[] {
-        return this._sensorGroups
     }
 
     /**
@@ -308,8 +394,8 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
      * setup is attached to the resource so the activation-time materialisation
      * pipeline sees the derivations during memory sizing.
      *
-     * Idempotent, as the base-class contract requires: `prepare` may run more than once over a
-     * recording's lifetime. A second pass would otherwise append a second channel per derivation
+     * Idempotent, as the base-class contract requires: a recording may be loaded more than once over its
+     * lifetime. A second pass would otherwise append a second channel per derivation
      * and compute the new setup channels' indices past the end of the worker's cache slots, since
      * the source count it measures would by then include the first pass's derived channels.
      */
@@ -788,52 +874,11 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
         return synthesizer.synthesize([signal], samplingRate || this._samplingRate || 0, opts)
     }
 
-    async prepare (options?: UrlAccessOptions): Promise<boolean> {
-        if (!this._service || this._state === 'error') {
-            Log.error(
-                `Cannot prepare ACC recording; service is unavailable or already in an error state.`,
-                SCOPE,
-            )
-            return false
-        }
-        const ok = await this._service.setupWorker(
-            this._headers,
-            this._source as StudyContext,
-            options,
-            this._formatHeader || undefined,
-        ).then(response => {
-            if (response) {
-                this.totalDuration = response
-                return true
-            }
-            this._errorReason = 'Setting up worker failed'
-            this.state = 'error'
-            return false
-        }).catch(e => {
-            Log.error(`Error when preparing the worker for the ACC recording.`, SCOPE, e as Error)
-            this._errorReason = 'Setting up worker failed'
-            this.state = 'error'
-            return false
-        })
-        if (ok) {
-            await this._applyDefaultSetups()
-            // Flip to 'ready' only after the setups are attached. `state === 'ready'` is what makes
-            // the resource `isReady`, and the ACTIVATE handler budgets memory from
-            // `_setup.derivations` and builds montages from `_recMontageTemplate`; reaching it
-            // between the two leaves the SAB sized without a magnitude slot and the resource with
-            // no montages, with nothing to retrigger either.
-            this.state = 'ready'
-            // The loader starts prepare() without awaiting it and `setActiveResource` flips
-            // `isActive` without checking `isReady`, so a recording can be activated before it is
-            // prepared. The ACTIVATE handler's `state === 'ready'` guard is false at that point and
-            // nothing retries, so re-dispatch now that readiness is real. The handler's own guards
-            // make this a no-op once the service is set up.
-            if (this._isActive && !this._service?.isReady) {
-                Log.debug(`Recording activated before ready; running deferred setup.`, SCOPE)
-                this.dispatchEvent(AssetEvents.ACTIVATE, 'after')
-            }
-        }
-        return ok
+    /**
+     * Load the recording; see {@link load}.
+     */
+    prepare (options?: ConfigStudyLoader) {
+        return this.load(options)
     }
 
     /**
