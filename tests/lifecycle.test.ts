@@ -84,7 +84,14 @@ describe('_load', () => {
             _formatHeader: null,
             _errorReason: '',
             _getWorker: vi.fn(() => (options.worker === undefined ? {} : options.worker)),
+            // Core's check of a load superseded by an unload or a destroy, which `_load` reads after each await.
+            _isLoadSuperseded (generation: number) {
+                return generation !== context._loadGeneration || context._state === 'destroyed'
+            },
+            _loadGeneration: 0,
+            _loadRun: null,
             _memoryManager: null,
+            _releaseSupersededService: vi.fn(),
             _readSource: vi.fn(),
             _service: service as typeof service | null,
             _state: 'loading',
@@ -149,5 +156,53 @@ describe('_load', () => {
         await expect(callPrototype('_load', context, {})).resolves.toBe(false)
         expect(context._errorReason).toBe('Recording study is incomplete')
         expect(service.setupWorker).not.toHaveBeenCalled()
+    })
+
+    it('sets nothing up on a recording destroyed while its worker was being set up', async () => {
+        const { context, order, service } = makeContext()
+        service.setupWorker.mockImplementationOnce(() => {
+            context._state = 'destroyed'
+            return Promise.resolve(120)
+        })
+        await expect(callPrototype('_load', context, {})).resolves.toBe(false)
+        expect(context.totalDuration).toBe(0)
+        expect(order).not.toContain('setups')
+        expect(context._errorReason).toBe('')
+    })
+
+    it('sets nothing up on a recording whose service went while its worker was being set up', async () => {
+        const { context, order, service } = makeContext()
+        service.setupWorker.mockImplementationOnce(() => {
+            context._service = null
+            return Promise.resolve(0)
+        })
+        await expect(callPrototype('_load', context, {})).resolves.toBe(false)
+        expect(order).not.toContain('setups')
+        expect(context._errorReason).toBe('')
+    })
+
+    it('sets nothing up on a recording unloaded while its worker was being set up', async () => {
+        const { context, order, service } = makeContext()
+        service.setupWorker.mockImplementationOnce(() => {
+            context._loadGeneration++
+            context._state = 'added'
+            return Promise.resolve(120)
+        })
+        await expect(callPrototype('_load', context, {})).resolves.toBe(false)
+        expect(context.totalDuration).toBe(0)
+        expect(order).not.toContain('setups')
+        // The state and the reason are left to the unload.
+        expect(context._state).toBe('added')
+        expect(context._errorReason).toBe('')
+        expect(context._releaseSupersededService).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not report a recording destroyed while its setups were attached as loaded', async () => {
+        const { context } = makeContext()
+        context._applyDefaultSetups.mockImplementationOnce(() => {
+            context._state = 'destroyed'
+            return Promise.resolve()
+        })
+        await expect(callPrototype('_load', context, {})).resolves.toBe(false)
     })
 })

@@ -64,12 +64,14 @@ export default class AccStudyLoader extends BiosignalStudyLoader {
 
     createListedResource (listing: StudyListing) {
         // Kept out of `_resources`: that list is what a read study's resource is found in by index, and a listing
-        // entered between a read and its `getResource` would take the read study's place.
+        // entered between a read and its `getResource` would take the read study's place. The recording takes the
+        // modality it is listed under, which the loader has been checked to support.
         return new AccRecording(
             listing.name,
             undefined,
             () => this._getFileWorker(),
             this._memoryManager || undefined,
+            listing.modality ? { modality: listing.modality } : undefined,
         )
     }
 

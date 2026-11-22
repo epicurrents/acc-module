@@ -62,6 +62,9 @@ import type {
 } from '#types'
 
 const SCOPE = 'AccRecording'
+/** The error reason of a recording whose signal cache could not be filled, with the likely cause as a hint. */
+const SIGNAL_CACHING_FAILED =
+    'Signal caching failed; the recording may be too large for the configured memory budget'
 
 /**
  * Length (seconds) of each stethoscope synthesis window. Stethoscope audio is time-preserving, so its buffer length
@@ -125,6 +128,18 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
     protected _samplingRate: number | null = null
     protected _sensorGroups: AccSensorGroup[] = []
     protected _service: AccService | null = null
+    /**
+     * Identifies the current setup run. {@link _supersedeSetup} moves it on, so a run that started under an earlier
+     * value has been superseded; {@link _isSetupSuperseded} is the check.
+     */
+    protected _setupGeneration = 0
+    /**
+     * The generation the newest setup run started under. Equal to {@link _setupGeneration} while a run that has not
+     * been superseded holds what a setup commissions, which a superseded run then leaves alone.
+     */
+    protected _setupOwnerGeneration = -1
+    /** The cache setup in progress, shared by every call to {@link _completeSetup} made while it runs. */
+    protected _setupRun: Promise<void> | null = null
     /** Shorthand for accessing ACC module settings from the global runtime. */
     #SETTINGS = (window.__EPICURRENTS__?.RUNTIME?.SETTINGS.modules.acc as AccModuleSettings) || null
 
@@ -168,7 +183,9 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
             if (!this._isActive) {
                 return
             }
-            if (!this._source && !this.isListed) {
+            // A load already reading the study of a listed recording is joined: its state is `loading`, which is
+            // neither listed nor, until the read lands, holding a source.
+            if (!this._source && !this.isListed && this._state !== 'loading') {
                 return
             }
             // The listener slot is synchronous, so the setup's failure has to be caught here or it surfaces as an
@@ -213,12 +230,85 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
     }
 
     /**
-     * Commission the signal cache of a loaded recording, build its default montage and fill the cache: allocate the
-     * shared buffer (or the JS-heap cache), add the `rec` montage, and cache the signals. Idempotent: a ready service
-     * means the work is already done, and a recording that has not loaded is not yet set up to receive it.
+     * Commission the signal cache of a loaded recording, build its default montage and fill the cache. Calls made
+     * while a setup runs share it: the service reports ready only once the setup's first steps have landed, so a
+     * second run started before then would request the memory and commission the cache again.
      */
-    protected async _completeSetup (): Promise<void> {
+    protected _completeSetup (): Promise<void> {
+        if (this._setupRun) {
+            return this._setupRun
+        }
+        // Held before the run starts: its first step dispatches an event synchronously, and a listener that asks for
+        // the setup from that dispatch has to find this run rather than start a second one.
+        let settle = () => {}
+        let fail = (_reason: unknown) => {}
+        const run = new Promise<void>((resolve, reject) => {
+            settle = resolve
+            fail = reject
+        })
+        this._setupRun = run
+        // Cleared whatever the outcome, so a recording unloaded and activated again is set up again.
+        const clear = () => {
+            if (this._setupRun === run) {
+                this._setupRun = null
+            }
+        }
+        run.then(clear, clear)
+        this._runSetup().then(settle, fail)
+        return run
+    }
+
+    /**
+     * Leave the recording in `error` after a setup step failed. The reason goes first, so whatever reacts to the state
+     * finds it in place. The runtime deactivates a dataset member that enters `error`; the recording deactivates
+     * itself as well when it is still active after that, as one outside a dataset is.
+     * @param reason - What failed, as shown to the user.
+     */
+    protected _failSetup (reason: string) {
+        this.errorReason = reason
+        this.state = 'error'
+        if (this._isActive) {
+            this.isActive = false
+        }
+    }
+
+    /**
+     * Has the setup run that started under `generation` been superseded: the recording was unloaded or destroyed
+     * while the run was awaiting something. {@link _runSetup} checks after every await and stops without
+     * commissioning or dispatching anything more.
+     * @param generation - The value of `_setupGeneration` read when the run started.
+     */
+    protected _isSetupSuperseded (generation: number) {
+        return generation !== this._setupGeneration || (this._state as string) === 'destroyed'
+    }
+
+    /**
+     * Give back what a superseded setup run commissioned after the unload that superseded it had already released the
+     * buffers: the memory request, the mutex or the cache. A newer run that has taken the recording up owns what is
+     * commissioned now, and a destroyed recording has let go of its service, so both are left alone.
+     */
+    protected async _releaseSupersededSetup () {
+        if ((this._state as string) === 'destroyed' || this._setupOwnerGeneration === this._setupGeneration) {
+            return
+        }
+        try {
+            await this.releaseBuffers()
+        } catch (e: unknown) {
+            Log.warn(`Releasing the buffers of a superseded setup failed: ${String(e)}`, SCOPE)
+        }
+    }
+
+    /**
+     * Run one cache setup; see {@link _completeSetup}. Allocates the shared buffer (or the JS-heap cache), adds the
+     * `rec` montage, and caches the signals. Idempotent: a ready service means the work is already done, and a
+     * recording that has not loaded is not yet set up to receive it. A run superseded by an unload or a destroy stops
+     * at its next check.
+     */
+    protected async _runSetup (): Promise<void> {
         if (!this._service?.isReady && this._state === 'ready') {
+            // Read before the first await; every await below is followed by a check against it.
+            const generation = this._setupGeneration
+            this._setupOwnerGeneration = generation
             this.dispatchEvent(BiosignalResourceEvents.SIGNAL_CACHING_COMPLETE, 'before')
             if (this._memoryManager) {
                 // Lock cell (1) + mutex meta fields (5: allocated, start, end,
@@ -240,30 +330,35 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
                                 + dataFieldsLen
                 }
                 const memorySuccess = await this._service?.requestMemory(totalMem)
+                // Checked before the outcome is read: an unload that interrupted the request owns the state, and a
+                // request it made fail is no failure of the recording.
+                if (this._isSetupSuperseded(generation)) {
+                    return this._releaseSupersededSetup()
+                }
                 if (!memorySuccess) {
                     Log.error(`Memory allocation failed.`, SCOPE)
-                    this.state = 'error'
-                    this.errorReason = 'Memory allocation failed'
-                    this.isActive = false
+                    this._failSetup('Memory allocation failed')
                     return
                 }
                 Log.debug(`Memory allocation complete.`, SCOPE)
                 const mutex = await this.setupMutex()
+                if (this._isSetupSuperseded(generation)) {
+                    return this._releaseSupersededSetup()
+                }
                 if (!mutex) {
                     Log.error(`Mutex setup failed.`, SCOPE)
-                    this.state = 'error'
-                    this.errorReason = 'Mutex setup failed'
-                    this.isActive = false
+                    this._failSetup('Mutex setup failed')
                     return
                 }
                 Log.debug(`Buffer setup complete.`, SCOPE)
             } else {
                 const dataCache = await this.setupCache()
+                if (this._isSetupSuperseded(generation)) {
+                    return this._releaseSupersededSetup()
+                }
                 if (!dataCache) {
                     Log.error(`Data cache setup failed.`, SCOPE)
-                    this.state = 'error'
-                    this.errorReason = 'Data cache setup failed'
-                    this.isActive = false
+                    this._failSetup('Data cache setup failed')
                     return
                 }
                 Log.debug(`Data cache setup complete.`, SCOPE)
@@ -272,21 +367,24 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
             // adding it before `cacheSignals` ensures it's the active
             // montage by the time signals start arriving.
             await this._applyDefaultMontages()
+            if (this._isSetupSuperseded(generation)) {
+                return this._releaseSupersededSetup()
+            }
             Log.debug(`ACC recording initial setup complete.`, SCOPE)
             const cacheOk = await this.cacheSignals()
+            if (this._isSetupSuperseded(generation)) {
+                return this._releaseSupersededSetup()
+            }
             if (cacheOk === false) {
+                // The error reason is the one carrier of the user-facing wording, hint included: the log entry is
+                // raised without `announce`, since a host that reports a failed resource from its reason, as the
+                // interface does, would otherwise tell the user twice.
                 Log.error(
                     `Signal caching failed for ${this.name}.`,
                     SCOPE,
                     new Error(`Signal caching failed for ${this.name}.`),
-                    {
-                        announce:
-                            `Could not load "${this.name}" — the recording may be ` +
-                            `too large for the configured memory budget.`,
-                    },
                 )
-                this._errorReason = this._errorReason || 'Signal caching failed'
-                this.state = 'error'
+                this._failSetup(this._errorReason || SIGNAL_CACHING_FAILED)
             }
             this.dispatchEvent(BiosignalResourceEvents.SIGNAL_CACHING_COMPLETE)
         }
@@ -308,6 +406,9 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
         if (!this._headers) {
             this._readSource(source)
         }
+        // Read before the first await; every await below is followed by a check against it.
+        const generation = this._loadGeneration
+        let created: AccService | null = null
         if (!this._service) {
             const worker = this._getWorker?.() ?? null
             if (!worker) {
@@ -315,7 +416,8 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
                 this._errorReason = 'No file worker'
                 return false
             }
-            this._service = new AccService(this, worker, this._memoryManager || undefined)
+            created = new AccService(this, worker, this._memoryManager || undefined)
+            this._service = created
         }
         const duration = await this._service.setupWorker(
             this._headers as BiosignalHeaderRecord,
@@ -326,12 +428,37 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
             Log.error(`Error when preparing the worker for the ACC recording.`, SCOPE, e as Error)
             return 0
         })
+        // A recording unloaded or destroyed while its worker was being set up has nothing left to set up, and its state
+        // belongs to whatever superseded the load.
+        if (this._isLoadSuperseded(generation)) {
+            this._releaseSupersededService(created)
+            return false
+        }
+        if (!this._service) {
+            return false
+        }
         if (!duration) {
             this._errorReason = 'Setting up worker failed'
+            // A recording that failed to load is not loaded again, so a service created for this load would keep its
+            // worker running for nothing. The shutdown is not awaited: it waits on an answer from a worker that has
+            // just failed to give one, and the load's outcome does not depend on it.
+            if (created && this._service === created) {
+                this._service = null
+                created.destroy().catch((e: unknown) => {
+                    Log.warn(`Shutting down the ACC worker after a failed load failed: ${String(e)}`, SCOPE)
+                })
+            }
             return false
         }
         this.totalDuration = duration
         await this._applyDefaultSetups()
+        if (this._isLoadSuperseded(generation)) {
+            this._releaseSupersededService(created)
+            return false
+        }
+        if (!this._service) {
+            return false
+        }
         return true
     }
 
@@ -375,6 +502,32 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
         this._dataDuration = header.dataDuration || 0
         this._totalDuration = header.totalDuration || this._dataDuration
         this._startTime = header.recordingStartTime ?? null
+    }
+
+    /**
+     * Supersede the setup in progress, if there is one: its run stops at its next check, and the next call to
+     * {@link _completeSetup} starts a run of its own. `unload` and `destroy` call this before anything they await,
+     * beside core's `_supersedeLoad`.
+     */
+    protected _supersedeSetup () {
+        this._setupGeneration++
+        this._setupRun = null
+    }
+
+    /**
+     * Shut down the service a superseded load created, so its worker does not outlive a load that set nothing up. A
+     * service the recording no longer holds has been released by whatever superseded the load, and one a later load
+     * has taken up is that load's to keep.
+     * @param created - The service the superseded load created; null when it used one the recording already had.
+     */
+    protected _releaseSupersededService (created: AccService | null) {
+        if (!created || this._service !== created || this._loadRun || this._state === 'ready') {
+            return
+        }
+        this._service = null
+        created.destroy().catch((e: unknown) => {
+            Log.warn(`Shutting down the ACC worker of a superseded load failed: ${String(e)}`, SCOPE)
+        })
     }
 
     /**
@@ -769,6 +922,9 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
 
     destroy (): Promise<void> {
         this._audio.destroy()
+        this._getWorker = null
+        // A cache setup still running stops at its next check, and is not one a later call may join.
+        this._supersedeSetup()
         return super.destroy()
     }
 
@@ -983,5 +1139,12 @@ export default class AccRecording extends GenericBiosignalResource implements Ac
 
     setAudioPlaybackRate (rate: number): void {
         this._audio.setPlaybackRate(rate)
+    }
+
+    unload () {
+        // A cache setup still running was commissioning what the unload releases: it stops at its next check, and the
+        // next activation starts its own rather than joining it.
+        this._supersedeSetup()
+        return super.unload()
     }
 }

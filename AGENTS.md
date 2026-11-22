@@ -66,7 +66,7 @@ The asymmetry means **a new top-level directory under `src/` type-checks and fai
 
 The corollary for review: when a test file declares a local helper that mirrors a production function, check whether the assertions reach the real one.
 
-The exception is the listing path, which lives between this package and core: [tests/listed.test.ts](tests/listed.test.ts) drives the real loader through the real `listStudy` and activation, with only the importer as a double, shaped like the CSV importer.
+The exception is the listing path, which lives between this package and core: [tests/listed.test.ts](tests/listed.test.ts) drives the real loader through the real `listStudy` and activation, with only the importer as a double, shaped like the CSV importer. [tests/retry.test.ts](tests/retry.test.ts) does the same for a failed load retried through core's `retryLoad` and for a cache setup overtaken by an unload, which follow the supersession and failure rules [eeg-module's AGENTS.md](../eeg-module/AGENTS.md) describes (`_supersedeSetup`, `_isSetupSuperseded`, `_releaseSupersededSetup`, `_failSetup`). The same file pins that a failed cache fill is reported through the error reason alone, hint included, and logged without `announce`; a host without the interface reads the reason from the `errorReason` property-change event.
 
 ## Code comment conventions
 

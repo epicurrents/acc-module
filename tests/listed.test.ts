@@ -131,6 +131,95 @@ describe('a listed ACC study', () => {
         expect(complete).toHaveBeenCalledTimes(1)
     })
 
+    it('completes the setup of a listed recording activated while its study is being read', async () => {
+        const complete = vi.spyOn(AccRecording.prototype as unknown as { _completeSetup: () => Promise<void> },
+                                  '_completeSetup')
+            .mockResolvedValue(undefined)
+        const listed = app.listStudy({ loader: 'acc/url', name: 'Listed', source: 'blob:acc' }, { dataset })!
+        // Somebody else's load: the recording is neither listed nor holding a source while it reads.
+        const loaded = listed.load()
+        expect(listed.state).toBe('loading')
+        expect(listed.source).toBe(null)
+        listed.isActive = true
+        expect(await loaded).toBe(true)
+        await vi.waitFor(() => expect(complete).toHaveBeenCalledTimes(1))
+    })
+
+    it('runs one setup for calls made while it is in flight, and another once it has settled', async () => {
+        type Internals = { _completeSetup: () => Promise<void>, _runSetup: () => Promise<void> }
+        const listed = app.listStudy({ loader: 'acc/url', name: 'Listed', source: 'blob:acc' }, { dataset })!
+        const internals = listed as unknown as Internals
+        let finish = () => {}
+        const run = vi.spyOn(internals, '_runSetup').mockImplementation(() => new Promise<void>(resolve => {
+            finish = resolve
+        }))
+        const first = internals._completeSetup()
+        expect(internals._completeSetup()).toBe(first)
+        expect(run).toHaveBeenCalledTimes(1)
+        finish()
+        await first
+        expect(internals._completeSetup()).not.toBe(first)
+        expect(run).toHaveBeenCalledTimes(2)
+    })
+
+    it('shuts down the service it created when the worker cannot be set up', async () => {
+        vi.spyOn(AccService.prototype, 'setupWorker').mockResolvedValue(0)
+        const destroy = vi.spyOn(AccService.prototype, 'destroy').mockResolvedValue(undefined)
+        const listed = app.listStudy({ loader: 'acc/url', name: 'Listed', source: 'blob:acc' }, { dataset })!
+        expect(await listed.load()).toBe(false)
+        expect(listed.errorReason).toBe('Setting up worker failed')
+        expect(destroy).toHaveBeenCalledTimes(1)
+        expect((listed as unknown as { _service: unknown })._service).toBe(null)
+    })
+
+    it('is left listed, with the service of the load shut down, when it is unloaded while it loads', async () => {
+        let answer = (_duration: number) => {}
+        const setupWorker = vi.spyOn(AccService.prototype, 'setupWorker').mockReturnValue(new Promise(resolve => {
+            answer = resolve
+        }))
+        const destroy = vi.spyOn(AccService.prototype, 'destroy').mockResolvedValue(undefined)
+        const listed = app.listStudy({ loader: 'acc/url', name: 'Listed', source: 'blob:acc' }, { dataset })!
+        // The buffer release is core's own and not what is being pinned.
+        vi.spyOn(listed as AccRecording, 'releaseBuffers').mockResolvedValue(undefined)
+        const loaded = listed.load()
+        await vi.waitFor(() => expect(setupWorker).toHaveBeenCalledTimes(1))
+        await listed.unload()
+        expect(listed.state).toBe('added')
+        answer(60)
+        expect(await loaded).toBe(false)
+        expect(listed.state).toBe('added')
+        expect(listed.errorReason).toBe('')
+        expect(destroy).toHaveBeenCalledTimes(1)
+        expect((listed as unknown as { _service: unknown })._service).toBe(null)
+    })
+
+    it('starts a setup of its own once an unload has interrupted the one in flight', async () => {
+        type Internals = { _completeSetup: () => Promise<void>, _runSetup: () => Promise<void> }
+        const listed = app.listStudy({ loader: 'acc/url', name: 'Listed', source: 'blob:acc' }, { dataset })!
+        vi.spyOn(listed as AccRecording, 'releaseBuffers').mockResolvedValue(undefined)
+        const internals = listed as unknown as Internals
+        const run = vi.spyOn(internals, '_runSetup').mockImplementation(() => new Promise<void>(() => {}))
+        const first = internals._completeSetup()
+        await listed.unload()
+        expect(internals._completeSetup()).not.toBe(first)
+        expect(run).toHaveBeenCalledTimes(2)
+    })
+
+    it('lets go of the worker source when it is destroyed', async () => {
+        const listed = app.listStudy({ loader: 'acc/url', name: 'Listed', source: 'blob:acc' }, { dataset })!
+        // The buffer release is core's own and not what is being pinned.
+        vi.spyOn(listed as AccRecording, 'releaseBuffers').mockResolvedValue(undefined)
+        await listed.destroy()
+        expect((listed as unknown as { _getWorker: unknown })._getWorker).toBe(null)
+    })
+
+    it('creates the listed recording under the modality it is listed as', () => {
+        const loader = new AccStudyLoader('AccLoader', importer as never)
+        const base = { loader: 'acc/url', name: 'Listed', source: 'blob:acc' }
+        expect(loader.createListedResource({ ...base, modality: 'acc-wrist' }).modality).toBe('acc-wrist')
+        expect(loader.createListedResource(base).modality).toBe('acc')
+    })
+
     it('fails on the listed object when the study it reads is incomplete', async () => {
         importer.importUrl.mockImplementationOnce(async () => {
             importer.study!.meta = { channels: CHANNELS }
